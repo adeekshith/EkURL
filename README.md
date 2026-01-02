@@ -1,6 +1,6 @@
 # Ekurl URL Shortener
 
-A high-performance, low-resource URL shortener written in Rust, using the 2024 edition. It uses `axum` for the web server and `redb` for a pure-Rust embedded database.
+A high-performance, low-resource URL shortener written in Rust, using the 2021 edition. It uses `axum` for the web server and `redb` for a pure-Rust embedded database.
 
 ## Features
 - Fast and lightweight.
@@ -15,13 +15,32 @@ A high-performance, low-resource URL shortener written in Rust, using the 2024 e
 - Docker and Docker Compose (recommended)
 - Rust (if running locally)
 
-### Running with Docker Compose
+### Running with Docker Compose (Local Build)
 1. Clone the repository.
 2. Run:
    ```bash
    docker-compose up -d
    ```
 3. Access the UI at `http://localhost:8080`.
+
+### Running with Docker Compose (GHCR Image)
+If you prefer to use the pre-built image:
+
+1. Create a `docker-compose.yml` file:
+   ```yaml
+   services:
+     ekurl:
+       image: ghcr.io/adeekshith/ekurl:latest
+       ports:
+         - "8080:8080"
+       volumes:
+         - ./data:/app/data
+       restart: unless-stopped
+   ```
+2. Run:
+   ```bash
+   docker-compose up -d
+   ```
 
 ### Running with Docker
 1. Build the image:
