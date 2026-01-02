@@ -144,22 +144,16 @@ pub async fn shorten_api(
 
     if let Some(host_header) = headers.get("host") {
         if let Ok(host_str) = host_header.to_str() {
-            let app_host = host_str.split(':').next().unwrap_or(host_str);
-            if let Some(input_host) = url_parsed.host_str() {
-                if input_host == app_host {
-                    return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Cannot shorten URLs from the same domain".to_string() })).into_response();
-                }
+            if is_same_domain(&url_parsed, host_str) {
+                return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Cannot shorten URLs from the same domain".to_string() })).into_response();
             }
         }
     }
 
     let is_custom = payload.custom_code.is_some();
     let code = if let Some(custom) = payload.custom_code {
-        if custom.len() < 3 || custom.len() > 32 {
-            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Custom code must be between 3 and 32 characters".to_string() })).into_response();
-        }
-        if !custom.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Invalid characters in code".to_string() })).into_response();
+        if let Err(err) = validate_custom_code(&custom) {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: err })).into_response();
         }
         custom
     } else {
@@ -176,9 +170,27 @@ pub async fn shorten_api(
 
     match state.db.insert(code.clone(), payload.url).await {
         Ok(true) => (StatusCode::CREATED, Json(ShortenResponse { code })).into_response(),
-        Ok(false) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Failed to insert".to_string() })).into_response(), // Should be caught by exists check ideally, but for auto-gen codes collision is rare
+        Ok(false) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Failed to insert".to_string() })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+fn validate_custom_code(code: &str) -> Result<(), String> {
+    if code.len() < 3 || code.len() > 32 {
+        return Err("Custom code must be between 3 and 32 characters".to_string());
+    }
+    if !code.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err("Invalid characters in code".to_string());
+    }
+    Ok(())
+}
+
+fn is_same_domain(url: &Url, host_header: &str) -> bool {
+    let app_host = host_header.split(':').next().unwrap_or(host_header);
+    if let Some(input_host) = url.host_str() {
+        return input_host == app_host;
+    }
+    false
 }
 
 pub async fn redirect_url(
@@ -189,5 +201,32 @@ pub async fn redirect_url(
         Ok(Some(url)) => Redirect::temporary(&url).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_custom_code() {
+        assert!(validate_custom_code("abc").is_ok());
+        assert!(validate_custom_code("my-code_123").is_ok());
+        assert!(validate_custom_code("ab").is_err());
+        assert!(validate_custom_code(&"a".repeat(33)).is_err());
+        assert!(validate_custom_code("code!").is_err());
+        assert!(validate_custom_code("code space").is_err());
+    }
+
+    #[test]
+    fn test_is_same_domain() {
+        let url = Url::parse("https://example.com/foo").unwrap();
+        assert!(is_same_domain(&url, "example.com"));
+        assert!(is_same_domain(&url, "example.com:8080"));
+        assert!(!is_same_domain(&url, "google.com"));
+        
+        let local_url = Url::parse("http://localhost:8080/bar").unwrap();
+        assert!(is_same_domain(&local_url, "localhost:8080"));
+        assert!(is_same_domain(&local_url, "localhost"));
     }
 }
