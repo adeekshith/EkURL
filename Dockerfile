@@ -19,9 +19,11 @@ FROM scratch
 WORKDIR /app
 
 # Copy the binary and static files
-COPY --from=builder /app/target/release/ekurl /app/ekurl
+COPY --from=builder /app/target/release/ekurl /usr/local/bin/ekurl
 COPY --from=builder /app/static /app/static
+
+ENV PATH="/usr/local/bin:${PATH}"
 
 EXPOSE 8080
 
-ENTRYPOINT ["/app/ekurl"]
+ENTRYPOINT ["ekurl"]

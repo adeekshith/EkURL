@@ -6,6 +6,7 @@ A high-performance, low-resource URL shortener written in Rust, using the 2021 e
 - Fast and lightweight.
 - API for shortening URLs.
 - Web UI for easy use.
+- CLI for managing URLs (add, remove, list, count).
 - Optional custom short codes.
 - Static Musl build in a `scratch` Docker image (minimal footprint).
 
@@ -58,6 +59,39 @@ If you prefer to use the pre-built image:
    cargo run
    ```
 2. The server will start on `http://0.0.0.0:8080`.
+
+## CLI Management
+You can manage URLs directly from the command line using the `ekurl` binary.
+
+### Commands
+- `ekurl add <url> [--code <custom>]`: Add a new short link.
+- `ekurl remove <code>`: Remove a short link.
+- `ekurl list`: List all short links.
+- `ekurl count`: Show total number of links.
+- `ekurl help`: Show help message.
+
+### Managing via Docker
+Since the Docker image is built from `scratch`, you must invoke the binary directly to run commands inside the container.
+
+**List all URLs:**
+```bash
+docker exec -it <container_name> /app/ekurl list
+```
+
+**Add a URL:**
+```bash
+docker exec -it <container_name> /app/ekurl add https://google.com --code google
+```
+
+**Remove a URL:**
+```bash
+docker exec -it <container_name> /app/ekurl remove google
+```
+
+**Get Count:**
+```bash
+docker exec -it <container_name> /app/ekurl count
+```
 
 ## API Documentation
 
