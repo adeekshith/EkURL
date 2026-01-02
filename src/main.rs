@@ -134,9 +134,10 @@ async fn shorten_url(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
 
-        if let Err(_) = table.insert(code.as_str(), payload.url.as_str()) {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
+        match table.insert(code.as_str(), payload.url.as_str()) {
+            Ok(_) => {},
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
     }
 
     if let Err(_) = write_txn.commit() {

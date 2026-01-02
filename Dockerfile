@@ -1,5 +1,5 @@
 # Builder stage
-FROM rust:1.83-alpine AS builder
+FROM rust:alpine AS builder
 
 RUN apk add --no-cache musl-dev
 
@@ -11,7 +11,7 @@ COPY src ./src
 COPY static ./static
 
 # Build the application
-RUN cargo build --release --target x86_64-unknown-linux-musl
+RUN cargo build --release
 
 # Final stage
 FROM scratch
@@ -19,7 +19,7 @@ FROM scratch
 WORKDIR /app
 
 # Copy the binary and static files
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/ekurl /app/ekurl
+COPY --from=builder /app/target/release/ekurl /app/ekurl
 COPY --from=builder /app/static /app/static
 
 EXPOSE 8080
