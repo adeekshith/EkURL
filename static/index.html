@@ -3,146 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EkURL URL Shortener</title>
-    <style>
-        :root {
-            --primary: #2563eb;
-            --bg: #f8fafc;
-            --card-bg: white;
-            --text: #1e293b;
-            --border: #cbd5e1;
-            --result-bg: #f1f5f9;
-            --link: #2563eb;
-        }
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #0f172a;
-                --card-bg: #1e293b;
-                --text: #f8fafc;
-                --border: #334155;
-                --result-bg: #334155;
-                --link: #60a5fa;
-            }
-        }
-        body {
-            font-family: system-ui, -apple-system, sans-serif;
-            background-color: var(--bg);
-            color: var(--text);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-            transition: background-color 0.3s, color 0.3s;
-        }
-        .container {
-            background: var(--card-bg);
-            padding: 2rem;
-            border-radius: 0.75rem;
-            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-            width: 100%;
-            max-width: 400px;
-            transition: background-color 0.3s;
-        }
-        h1 { margin-top: 0; font-size: 1.5rem; }
-        .form-group { margin-bottom: 1rem; }
-        label { display: block; margin-bottom: 0.5rem; font-weight: 500; }
-        input {
-            width: 100%;
-            padding: 0.625rem;
-            border: 1px solid var(--border);
-            border-radius: 0.375rem;
-            box-sizing: border-box;
-            background-color: var(--card-bg);
-            color: var(--text);
-            transition: background-color 0.3s, border-color 0.3s, color 0.3s;
-        }
-        input::placeholder { color: #94a3b8; }
-        button {
-            width: 100%;
-            padding: 0.625rem;
-            background-color: var(--primary);
-            color: white;
-            border: none;
-            border-radius: 0.375rem;
-            font-weight: 600;
-            cursor: pointer;
-        }
-        button:hover { opacity: 0.9; }
-        #result {
-            margin-top: 1.5rem;
-            padding: 1rem;
-            background: var(--result-bg);
-            border-radius: 0.375rem;
-            display: none;
-            word-break: break-all;
-            transition: background-color 0.3s;
-        }
-        #short-link {
-            color: var(--link);
-            text-decoration: none;
-        }
-        #short-link:hover {
-            text-decoration: underline;
-        }
-        .error { color: #ef4444; margin-top: 0.5rem; font-size: 0.875rem; }
-    </style>
+    <title>EkURL - URL Shortener</title>
+    <link rel="stylesheet" href="./css/style.css">
 </head>
 <body>
     <div class="container">
+        
         <div class="form-group">
             <label for="url">Long URL</label>
             <input type="url" id="url" placeholder="https://example.com/very-long-path" required>
         </div>
+        
         <div class="form-group">
             <label for="custom_code">Custom Code (Optional)</label>
             <input type="text" id="custom_code" placeholder="my-cool-link">
         </div>
-        <button onclick="shorten()">Shorten URL</button>
+        
+        <button id="shorten-btn">Shorten URL</button>
+        
         <div id="error" class="error"></div>
+        
         <div id="result">
-            <strong>Short URL:</strong><br>
+            <div class="result-header">Your short link is ready</div>
             <a id="short-link" href="" target="_blank"></a>
+            <button id="copy-btn">Copy to Clipboard</button>
         </div>
     </div>
 
-    <script>
-        async function shorten() {
-            const url = document.getElementById('url').value;
-            const custom_code = document.getElementById('custom_code').value;
-            const errorDiv = document.getElementById('error');
-            const resultDiv = document.getElementById('result');
-            const shortLink = document.getElementById('short-link');
-
-            errorDiv.textContent = '';
-            resultDiv.style.display = 'none';
-
-            if (!url) {
-                errorDiv.textContent = 'URL is required';
-                return;
-            }
-
-            try {
-                const response = await fetch('/api/v1/shorten', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, custom_code: custom_code || null })
-                });
-
-                const data = await response.json();
-
-                if (response.ok) {
-                    const fullShortUrl = window.location.origin + '/' + data.code;
-                    shortLink.href = fullShortUrl;
-                    shortLink.textContent = fullShortUrl;
-                    resultDiv.style.display = 'block';
-                } else {
-                    errorDiv.textContent = data.error || 'Something went wrong';
-                }
-            } catch (err) {
-                errorDiv.textContent = 'Failed to connect to the server';
-            }
-        }
-    </script>
+    <script src="./js/app.js"></script>
 </body>
 </html>
