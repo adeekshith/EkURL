@@ -38,7 +38,7 @@ impl Db {
                 )",
                 [],
             )?;
-            Ok(())
+            Ok::<_, rusqlite::Error>(())
         }).await?;
 
         Ok(Self { conn })
@@ -52,14 +52,14 @@ impl Db {
             ) {
                 Ok(_) => Ok(true),
                 Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => Ok(false),
-                Err(e) => Err(tokio_rusqlite::Error::Rusqlite(e)),
+                Err(e) => Err(tokio_rusqlite::Error::Error(e)),
             }
         }).await.map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn delete(&self, code: String) -> anyhow::Result<bool> {
         let count = self.conn.call(move |conn| {
-            Ok(conn.execute("DELETE FROM urls WHERE code = ?1", rusqlite::params![code])?)
+            Ok::<_, rusqlite::Error>(conn.execute("DELETE FROM urls WHERE code = ?1", rusqlite::params![code])?)
         }).await?;
         Ok(count > 0)
     }
@@ -75,13 +75,13 @@ impl Db {
             for row in rows {
                 result.push(row?);
             }
-            Ok(result)
+            Ok::<_, rusqlite::Error>(result)
         }).await.map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn count(&self) -> anyhow::Result<u64> {
         self.conn.call(|conn| {
-            Ok(conn.query_row("SELECT COUNT(*) FROM urls", [], |row| row.get(0))?)
+            Ok::<_, rusqlite::Error>(conn.query_row("SELECT COUNT(*) FROM urls", [], |row| row.get(0))?)
         }).await.map_err(|e| anyhow::anyhow!(e))
     }
 
@@ -92,7 +92,7 @@ impl Db {
                 rusqlite::params![code],
                 |row| row.get(0)
             ).optional()?;
-            Ok(url)
+            Ok::<_, rusqlite::Error>(url)
         }).await.map_err(|e| anyhow::anyhow!(e))
     }
 
@@ -103,7 +103,7 @@ impl Db {
                 rusqlite::params![code],
                 |row| row.get(0)
             )?;
-            Ok(exists)
+            Ok::<_, rusqlite::Error>(exists)
         }).await.map_err(|e| anyhow::anyhow!(e))
     }
 }
@@ -111,7 +111,7 @@ impl Db {
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/v1/shorten", post(shorten_api))
-        .route("/:code", get(redirect_url))
+        .route("/{code}", get(redirect_url))
         .fallback_service(ServeDir::new("static"))
         .with_state(state)
 }

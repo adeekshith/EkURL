@@ -4,23 +4,23 @@ version = "0.1.4"
 edition = "2024"
 
 [dependencies]
-axum = "0.7"
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
+axum = "0.8"
+tokio = { version = "1.48", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nanoid = "0.4"
-rusqlite = { version = "0.31", features = ["bundled"] }
-tokio-rusqlite = "0.5"
+rusqlite = { version = "0.37", features = ["bundled"] }
+tokio-rusqlite = "0.7"
 anyhow = "1.0"
 url = "2.5"
 clap = { version = "4.5", features = ["derive"] }
 
 [dev-dependencies]
-tower = { version = "0.4", features = ["util"] }
-hyper = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+hyper = { version = "1.8", features = ["full"] }
 
 [profile.release]
 opt-level = "z"
