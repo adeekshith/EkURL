@@ -6,13 +6,11 @@ use axum::{
     Json, Router,
 };
 use clap::{Parser, Subcommand};
-use lru::LruCache;
 use nanoid::nanoid;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio_rusqlite::Connection;
 use tower_http::services::ServeDir;
 use url::Url;
@@ -52,7 +50,6 @@ enum Commands {
 
 struct AppState {
     db: Connection,
-    cache: Arc<Mutex<LruCache<String, String>>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -110,15 +107,7 @@ async fn open_db() -> anyhow::Result<Connection> {
 async fn start_server() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let db = open_db().await?;
-    
-    let cache_size = env::var("CACHE_CAPACITY")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(1000);
-    let cache_size = NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(1000).unwrap());
-    
-    let cache = Arc::new(Mutex::new(LruCache::new(cache_size)));
-    let shared_state = Arc::new(AppState { db, cache });
+    let shared_state = Arc::new(AppState { db });
 
     let app = Router::new()
         .route("/api/v1/shorten", post(shorten_api))
@@ -132,7 +121,7 @@ async fn start_server() -> anyhow::Result<()> {
         .unwrap_or(8080);
     let addr = format!("0.0.0.0:{}", port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("listening on {}, cache size: {}", addr, cache_size);
+    tracing::info!("listening on {}", addr);
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -277,33 +266,17 @@ async fn redirect_url(
     Path(code): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    // Check cache first
-    {
-        let mut cache = state.cache.lock().unwrap();
-        if let Some(url) = cache.get(&code) {
-             return Redirect::temporary(url).into_response();
-        }
-    }
-
-    let code_clone = code.clone();
     let result = state.db.call(move |conn| {
         let url: Option<String> = conn.query_row(
             "SELECT url FROM urls WHERE code = ?1",
-            rusqlite::params![code_clone],
+            rusqlite::params![code],
             |row| row.get(0)
         ).optional()?;
         Ok(url)
     }).await;
 
     match result {
-        Ok(Some(url)) => {
-            // Update cache
-            {
-                 let mut cache = state.cache.lock().unwrap();
-                 cache.put(code, url.clone());
-            }
-            Redirect::temporary(&url).into_response()
-        },
+        Ok(Some(url)) => Redirect::temporary(&url).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }

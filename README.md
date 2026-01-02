@@ -8,7 +8,6 @@ A high-performance, low-resource URL shortener written in Rust, using the 2021 e
 - Web UI for easy use.
 - CLI for managing URLs (add, remove, list, count).
 - Optional custom short codes.
-- LRU caching for high-traffic redirects.
 - Static Musl build in a `scratch` Docker image (minimal footprint).
 
 ## Configuration
@@ -18,7 +17,6 @@ The following environment variables can be used to configure the application:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | The port the server binds to | `8080` |
-| `CACHE_CAPACITY` | Number of last queried URLs to keep in memory cache | `1000` |
 
 ## Getting Started
 
@@ -46,7 +44,6 @@ If you prefer to use the pre-built image:
          - "8080:8080"
        environment:
          - PORT=8080
-         - CACHE_CAPACITY=1000
        volumes:
          - ./data:/app/data
        restart: unless-stopped
