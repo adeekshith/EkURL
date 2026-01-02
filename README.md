@@ -1,6 +1,6 @@
 # Ekurl URL Shortener
 
-A high-performance, low-resource URL shortener written in Rust, using the 2021 edition. It uses `axum` for the web server and `redb` for a pure-Rust embedded database.
+A high-performance, low-resource URL shortener written in Rust, using the 2021 edition. It uses `axum` for the web server and `SQLite` (via `rusqlite`) for an embedded database.
 
 ## Features
 - Fast and lightweight.
@@ -8,7 +8,17 @@ A high-performance, low-resource URL shortener written in Rust, using the 2021 e
 - Web UI for easy use.
 - CLI for managing URLs (add, remove, list, count).
 - Optional custom short codes.
+- LRU caching for high-traffic redirects.
 - Static Musl build in a `scratch` Docker image (minimal footprint).
+
+## Configuration
+
+The following environment variables can be used to configure the application:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | The port the server binds to | `8080` |
+| `CACHE_CAPACITY` | Number of last queried URLs to keep in memory cache | `1000` |
 
 ## Getting Started
 
@@ -34,6 +44,9 @@ If you prefer to use the pre-built image:
        image: ghcr.io/adeekshith/ekurl:latest
        ports:
          - "8080:8080"
+       environment:
+         - PORT=8080
+         - CACHE_CAPACITY=1000
        volumes:
          - ./data:/app/data
        restart: unless-stopped
@@ -58,7 +71,7 @@ If you prefer to use the pre-built image:
    ```bash
    cargo run
    ```
-2. The server will start on `http://0.0.0.0:8080`.
+2. The server will start on `http://0.0.0.0:8080` (or `PORT`).
 
 ## CLI Management
 You can manage URLs directly from the command line using the `ekurl` binary.
@@ -71,26 +84,26 @@ You can manage URLs directly from the command line using the `ekurl` binary.
 - `ekurl help`: Show help message.
 
 ### Managing via Docker
-Since the Docker image is built from `scratch`, you must invoke the binary directly to run commands inside the container.
+The `ekurl` binary is available in the container's `PATH`.
 
 **List all URLs:**
 ```bash
-docker exec -it <container_name> /app/ekurl list
+docker exec -it <container_name> ekurl list
 ```
 
 **Add a URL:**
 ```bash
-docker exec -it <container_name> /app/ekurl add https://google.com --code google
+docker exec -it <container_name> ekurl add https://google.com --code google
 ```
 
 **Remove a URL:**
 ```bash
-docker exec -it <container_name> /app/ekurl remove google
+docker exec -it <container_name> ekurl remove google
 ```
 
 **Get Count:**
 ```bash
-docker exec -it <container_name> /app/ekurl count
+docker exec -it <container_name> ekurl count
 ```
 
 ## API Documentation
