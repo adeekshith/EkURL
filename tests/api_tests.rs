@@ -117,6 +117,22 @@ async fn test_api_shorten() -> anyhow::Result<()> {
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
 
+    // 5. Same Domain Restriction
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shorten")
+                .header("Content-Type", "application/json")
+                .header("Host", "myapp.com")
+                .body(Body::from(r#"{"url": "https://myapp.com/foo"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
     Ok(())
 }
 

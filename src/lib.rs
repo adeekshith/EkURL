@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -134,10 +134,23 @@ pub struct ErrorResponse {
 
 pub async fn shorten_api(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<ShortenRequest>,
 ) -> Response {
-    if Url::parse(&payload.url).is_err() {
-        return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Invalid URL format".to_string() })).into_response();
+    let url_parsed = match Url::parse(&payload.url) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Invalid URL format".to_string() })).into_response(),
+    };
+
+    if let Some(host_header) = headers.get("host") {
+        if let Ok(host_str) = host_header.to_str() {
+            let app_host = host_str.split(':').next().unwrap_or(host_str);
+            if let Some(input_host) = url_parsed.host_str() {
+                if input_host == app_host {
+                    return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Cannot shorten URLs from the same domain".to_string() })).into_response();
+                }
+            }
+        }
     }
 
     let is_custom = payload.custom_code.is_some();
