@@ -7,14 +7,13 @@ use axum::{
 };
 use clap::{Parser, Subcommand};
 use nanoid::nanoid;
-use redb::{Database, ReadableTable, TableDefinition, ReadableTableMetadata};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio_rusqlite::Connection;
 use tower_http::services::ServeDir;
 use url::Url;
 
-const TABLE: TableDefinition<&str, &str> = TableDefinition::new("urls");
-const DB_PATH: &str = "data/ekurl.redb";
+const DB_PATH: &str = "data/ekurl.db";
 
 #[derive(Parser)]
 #[command(name = "ekurl")]
@@ -48,7 +47,7 @@ enum Commands {
 }
 
 struct AppState {
-    db: Database,
+    db: Connection,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -82,21 +81,30 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn open_db() -> anyhow::Result<Database> {
+async fn open_db() -> anyhow::Result<Connection> {
     std::fs::create_dir_all("data")?;
-    let db = Database::builder().create(DB_PATH)?;
-    // Initialize table
-    let write_txn = db.begin_write()?;
-    {
-        let _ = write_txn.open_table(TABLE)?;
-    }
-    write_txn.commit()?;
-    Ok(db)
+    let conn = Connection::open(DB_PATH).await?;
+    
+    conn.call(|conn| {
+        // Enable WAL mode for concurrency
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS urls (
+                code TEXT PRIMARY KEY,
+                url TEXT NOT NULL
+            )",
+            [],
+        )?;
+        Ok(())
+    }).await?;
+
+    Ok(conn)
 }
 
 async fn start_server() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    let db = open_db()?;
+    let db = open_db().await?;
     let shared_state = Arc::new(AppState { db });
 
     let app = Router::new()
@@ -120,29 +128,38 @@ async fn handle_add(url: String, custom_code: Option<String>) -> anyhow::Result<
         std::process::exit(1);
     }
     let code = custom_code.unwrap_or_else(|| nanoid!(7));
-    let db = open_db()?;
-    let write_txn = db.begin_write()?;
-    {
-        let mut table = write_txn.open_table(TABLE)?;
-        if table.insert(code.as_str(), url.as_str())?.is_some() {
-             eprintln!("Error: Code '{}' updated (was already present)", code);
+    let db = open_db().await?;
+    
+    let url_clone = url.clone();
+    let code_clone = code.clone();
+
+    let result = db.call(move |conn| {
+        match conn.execute(
+            "INSERT INTO urls (code, url) VALUES (?1, ?2)",
+            rusqlite::params![code_clone, url_clone],
+        ) {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => Ok(false),
+            Err(e) => Err(tokio_rusqlite::Error::Rusqlite(e)),
         }
+    }).await?;
+
+    if result {
+        println!("Success: {} -> {}", code, url);
+    } else {
+        eprintln!("Error: Code '{}' updated (was already present)", code);
     }
-    write_txn.commit()?;
-    println!("Success: {} -> {}", code, url);
     Ok(())
 }
 
 async fn handle_remove(code: String) -> anyhow::Result<()> {
-    let db = open_db()?;
-    let write_txn = db.begin_write()?;
-    let existed = {
-        let mut table = write_txn.open_table(TABLE)?;
-        let res = table.remove(code.as_str())?.is_some();
-        res
-    };
-    write_txn.commit()?;
-    if existed {
+    let db = open_db().await?;
+    let code_clone = code.clone();
+    let count = db.call(move |conn| {
+        Ok(conn.execute("DELETE FROM urls WHERE code = ?1", rusqlite::params![code_clone])?)
+    }).await?;
+
+    if count > 0 {
         println!("Removed: {}", code);
     } else {
         eprintln!("Error: Code '{}' not found", code);
@@ -152,23 +169,35 @@ async fn handle_remove(code: String) -> anyhow::Result<()> {
 }
 
 async fn handle_list() -> anyhow::Result<()> {
-    let db = open_db()?;
-    let read_txn = db.begin_read()?;
-    let table = read_txn.open_table(TABLE)?;
+    let db = open_db().await?;
+    let items = db.call(|conn| {
+        let mut stmt = conn.prepare("SELECT code, url FROM urls")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }).await?;
+
     println!("{:<20} | {}", "Code", "URL");
     println!("{:-<20}-|-{}", "", "");
-    for item in table.iter()? {
-        let (code, url) = item?;
-        println!("{:<20} | {}", code.value(), url.value());
+    for (code, url) in items {
+        println!("{:<20} | {}", code, url);
     }
     Ok(())
 }
 
 async fn handle_count() -> anyhow::Result<()> {
-    let db = open_db()?;
-    let read_txn = db.begin_read()?;
-    let table = read_txn.open_table(TABLE)?;
-    println!("Total URLs: {}", table.len()?);
+    let db = open_db().await?;
+    let count: u64 = db.call(|conn| {
+        Ok(conn.query_row("SELECT COUNT(*) FROM urls", [], |row| row.get(0))?)
+    }).await?;
+    
+    println!("Total URLs: {}", count);
     Ok(())
 }
 
@@ -195,53 +224,57 @@ async fn shorten_api(
         nanoid!(7)
     };
 
-    let write_txn = match state.db.begin_write() {
-        Ok(t) => t,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
+    let code_clone = code.clone();
+    let url_clone = payload.url.clone();
 
-    {
-        let mut table = match write_txn.open_table(TABLE) {
-            Ok(t) => t,
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        };
-
-        if table.get(code.as_str()).unwrap().is_some() {
-            if is_custom {
-                return (StatusCode::CONFLICT, Json(ErrorResponse { error: "Code already in use".to_string() })).into_response();
+    let result = state.db.call(move |conn| {
+        if is_custom {
+            // Check existence first if custom code
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM urls WHERE code = ?1)",
+                rusqlite::params![code_clone],
+                |row| row.get(0)
+            )?;
+            if exists {
+                return Ok(Err("Code already in use"));
             }
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
+        
+        match conn.execute(
+            "INSERT INTO urls (code, url) VALUES (?1, ?2)",
+            rusqlite::params![code_clone, url_clone],
+        ) {
+            Ok(_) => Ok(Ok(())),
+            Err(e) => Err(tokio_rusqlite::Error::Rusqlite(e)),
+        }
+    }).await;
 
-        match table.insert(code.as_str(), payload.url.as_str()) {
-            Ok(_) => {},
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        };
+    match result {
+        Ok(Ok(_)) => (StatusCode::CREATED, Json(ShortenResponse { code })).into_response(),
+        Ok(Err(msg)) => (StatusCode::CONFLICT, Json(ErrorResponse { error: msg.to_string() })).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-
-    if let Err(_) = write_txn.commit() {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    (StatusCode::CREATED, Json(ShortenResponse { code })).into_response()
 }
 
 async fn redirect_url(
     Path(code): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let read_txn = match state.db.begin_read() {
-        Ok(t) => t,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
+    let result = state.db.call(move |conn| {
+        let url: Option<String> = conn.query_row(
+            "SELECT url FROM urls WHERE code = ?1",
+            rusqlite::params![code],
+            |row| row.get(0)
+        ).optional()?;
+        Ok(url)
+    }).await;
 
-    let table = match read_txn.open_table(TABLE) {
-        Ok(t) => t,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    match table.get(code.as_str()).unwrap() {
-        Some(url) => Redirect::temporary(url.value()).into_response(),
-        None => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+    match result {
+        Ok(Some(url)) => Redirect::temporary(&url).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
+
+// Add import for Optional trait
+use rusqlite::OptionalExtension;
