@@ -18,14 +18,26 @@
             <label for="custom_code">Custom Code (Optional)</label>
             <input type="text" id="custom_code" placeholder="my-cool-link">
         </div>
-        
+
+        <div class="form-group">
+            <label for="expires_in">Expires In</label>
+            <select id="expires_in">
+                <option value="30m">30 minutes</option>
+                <option value="1h">1 hour</option>
+                <option value="1d" selected>1 day</option>
+                <option value="7d">7 days</option>
+                <option value="never">Never</option>
+            </select>
+        </div>
+
         <button id="shorten-btn">Shorten URL</button>
-        
+
         <div id="error" class="error"></div>
-        
+
         <div id="result">
             <div class="result-header">Your short link is ready</div>
             <a id="short-link" href="" target="_blank"></a>
+            <div id="expiry-info" class="expiry-info"></div>
             <button id="copy-btn">Copy to Clipboard</button>
         </div>
     </div>

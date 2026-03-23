@@ -12,9 +12,11 @@ document.addEventListener('DOMContentLoaded', () => {
 async function shorten() {
     const url = document.getElementById('url').value.trim();
     const custom_code = document.getElementById('custom_code').value.trim();
+    const expires_in = document.getElementById('expires_in').value;
     const errorDiv = document.getElementById('error');
     const resultDiv = document.getElementById('result');
     const shortLink = document.getElementById('short-link');
+    const expiryInfo = document.getElementById('expiry-info');
 
     errorDiv.textContent = '';
     resultDiv.style.display = 'none';
@@ -30,7 +32,7 @@ async function shorten() {
         const response = await fetch('/api/v1/shorten', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, custom_code: custom_code || null })
+            body: JSON.stringify({ url, custom_code: custom_code || null, expires_in })
         });
 
         const data = await response.json();
@@ -39,6 +41,14 @@ async function shorten() {
             const fullShortUrl = window.location.origin + '/' + data.code;
             shortLink.href = fullShortUrl;
             shortLink.textContent = fullShortUrl;
+            if (data.expires_at) {
+                const expiryDate = new Date(data.expires_at * 1000);
+                expiryInfo.textContent = 'Expires: ' + expiryDate.toLocaleString();
+                expiryInfo.style.display = 'block';
+            } else {
+                expiryInfo.textContent = 'This link never expires';
+                expiryInfo.style.display = 'block';
+            }
             resultDiv.style.display = 'block';
         } else {
             showError(data.error || 'Something went wrong');

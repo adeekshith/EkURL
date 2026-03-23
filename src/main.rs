@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use ekurl::{create_router, AppState, Db};
+use ekurl::{create_router, parse_expires_in, AppState, Db};
 use nanoid::nanoid;
 use std::env;
 use std::sync::Arc;
@@ -26,6 +26,9 @@ enum Commands {
         /// Optional custom code
         #[arg(long)]
         code: Option<String>,
+        /// Expiry duration: 30m, 1h, 1d, 7d, or never (default: 1d)
+        #[arg(long, default_value = "1d")]
+        expires_in: String,
     },
     /// Remove a short link by its code
     Remove {
@@ -44,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Serve) | None => start_server().await?,
-        Some(Commands::Add { url, code }) => handle_add(url, code).await?,
+        Some(Commands::Add { url, code, expires_in }) => handle_add(url, code, expires_in).await?,
         Some(Commands::Remove { code }) => handle_remove(code).await?,
         Some(Commands::List) => handle_list().await?,
         Some(Commands::Count) => handle_count().await?,
@@ -57,6 +60,13 @@ async fn start_server() -> anyhow::Result<()> {
     std::fs::create_dir_all("data")?;
     tracing_subscriber::fmt::init();
     let db = Db::new(DB_PATH).await?;
+
+    // Clean up expired URLs on startup
+    let cleaned = db.cleanup_expired().await?;
+    if cleaned > 0 {
+        tracing::info!("cleaned up {} expired URLs", cleaned);
+    }
+
     let shared_state = Arc::new(AppState { db });
 
     let app = create_router(shared_state);
@@ -74,18 +84,33 @@ async fn start_server() -> anyhow::Result<()> {
 
 // --- CLI Handlers ---
 
-async fn handle_add(url: String, custom_code: Option<String>) -> anyhow::Result<()> {
+async fn handle_add(url: String, custom_code: Option<String>, expires_in: String) -> anyhow::Result<()> {
     if Url::parse(&url).is_err() {
         eprintln!("Error: Invalid URL format");
         std::process::exit(1);
     }
+
+    let expires_at = match parse_expires_in(Some(&expires_in)) {
+        Ok(ts) => ts,
+        Err(err) => {
+            eprintln!("Error: {}", err);
+            std::process::exit(1);
+        }
+    };
+
     let code = custom_code.unwrap_or_else(|| nanoid!(7));
-    
+
     std::fs::create_dir_all("data")?;
     let db = Db::new(DB_PATH).await?;
-    
-    match db.insert(code.clone(), url.clone()).await {
-        Ok(true) => println!("Success: {} -> {}", code, url),
+
+    match db.insert(code.clone(), url.clone(), expires_at).await {
+        Ok(true) => {
+            let expiry_msg = match expires_at {
+                Some(ts) => format!(" (expires: {})", ts),
+                None => " (never expires)".to_string(),
+            };
+            println!("Success: {} -> {}{}", code, url, expiry_msg);
+        }
         Ok(false) => {
              eprintln!("Error: Code '{}' updated (was already present)", code);
         }
@@ -120,10 +145,14 @@ async fn handle_list() -> anyhow::Result<()> {
     let db = Db::new(DB_PATH).await?;
     let items = db.list().await?;
 
-    println!("{:<20} | {}", "Code", "URL");
-    println!("{:-<20}-|-{}", "", "");
-    for (code, url) in items {
-        println!("{:<20} | {}", code, url);
+    println!("{:<20} | {:<40} | {}", "Code", "URL", "Expires");
+    println!("{:-<20}-|-{:-<40}-|-{}", "", "", "");
+    for (code, url, expires_at) in items {
+        let expiry = match expires_at {
+            Some(ts) => format!("{}", ts),
+            None => "never".to_string(),
+        };
+        println!("{:<20} | {:<40} | {}", code, url, expiry);
     }
     Ok(())
 }

@@ -4,6 +4,7 @@ use axum::{
 };
 use ekurl::{create_router, AppState, Db, ShortenResponse};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tower::util::ServiceExt;
 
 #[tokio::test]
@@ -11,10 +12,11 @@ async fn test_db_operations() -> anyhow::Result<()> {
     // Use in-memory DB for testing
     let db = Db::new(":memory:").await?;
 
-    // 1. Insert
+    // 1. Insert (with expiry far in future)
     let code = "test1".to_string();
     let url = "https://example.com".to_string();
-    let inserted = db.insert(code.clone(), url.clone()).await?;
+    let future_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 + 86400;
+    let inserted = db.insert(code.clone(), url.clone(), Some(future_ts)).await?;
     assert!(inserted, "Should insert new URL");
 
     // 2. Get
@@ -32,12 +34,14 @@ async fn test_db_operations() -> anyhow::Result<()> {
     // 5. List
     let list = db.list().await?;
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0], (code.clone(), url.clone()));
+    assert_eq!(list[0].0, code);
+    assert_eq!(list[0].1, url);
+    assert_eq!(list[0].2, Some(future_ts));
 
     // 6. Delete
     let deleted = db.delete(code.clone()).await?;
     assert!(deleted, "Should delete existing URL");
-    
+
     let count_after = db.count().await?;
     assert_eq!(count_after, 0);
 
@@ -48,12 +52,42 @@ async fn test_db_operations() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn test_db_expiry() -> anyhow::Result<()> {
+    let db = Db::new(":memory:").await?;
+
+    // Insert an already-expired URL
+    let past_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 - 10;
+    db.insert("expired".to_string(), "https://example.com".to_string(), Some(past_ts)).await?;
+
+    // Should not be retrievable
+    assert_eq!(db.get_url("expired".to_string()).await?, None);
+    assert!(!db.exists("expired".to_string()).await?);
+    assert_eq!(db.count().await?, 0);
+    assert!(db.list().await?.is_empty());
+
+    // Insert a never-expiring URL
+    db.insert("forever".to_string(), "https://example.com".to_string(), None).await?;
+    assert_eq!(db.get_url("forever".to_string()).await?, Some("https://example.com".to_string()));
+    assert!(db.exists("forever".to_string()).await?);
+    assert_eq!(db.count().await?, 1);
+
+    // Cleanup should remove the expired one
+    let cleaned = db.cleanup_expired().await?;
+    assert_eq!(cleaned, 1);
+
+    // The forever one should still be there
+    assert_eq!(db.count().await?, 1);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_api_shorten() -> anyhow::Result<()> {
     let db = Db::new(":memory:").await?;
     let state = Arc::new(AppState { db });
     let app = create_router(state);
 
-    // 1. Valid Shorten
+    // 1. Valid Shorten (default expiry = 1d)
     let response = app.clone()
         .oneshot(
             Request::builder()
@@ -67,10 +101,15 @@ async fn test_api_shorten() -> anyhow::Result<()> {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::CREATED);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let json: ShortenResponse = serde_json::from_slice(&body)?;
     assert!(!json.code.is_empty());
+    // Default expiry should be ~1 day from now
+    assert!(json.expires_at.is_some());
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let diff = json.expires_at.unwrap() - now;
+    assert!((86000..=86400).contains(&diff));
 
     // 2. Invalid URL
     let response = app.clone()
@@ -133,18 +172,57 @@ async fn test_api_shorten() -> anyhow::Result<()> {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
+    // 6. Never-expiring URL
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shorten")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"url": "https://forever.com", "expires_in": "never"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: ShortenResponse = serde_json::from_slice(&body)?;
+    assert!(json.expires_at.is_none());
+
+    // 7. Invalid expires_in value
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shorten")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"url": "https://example.com", "expires_in": "5m"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
     Ok(())
 }
 
 #[tokio::test]
 async fn test_api_redirect() -> anyhow::Result<()> {
     let db = Db::new(":memory:").await?;
-    db.insert("rust".to_string(), "https://rust-lang.org".to_string()).await?;
-    
+    // Insert with future expiry
+    let future_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 + 86400;
+    db.insert("rust".to_string(), "https://rust-lang.org".to_string(), Some(future_ts)).await?;
+
+    // Insert an expired URL
+    let past_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 - 10;
+    db.insert("old".to_string(), "https://old.com".to_string(), Some(past_ts)).await?;
+
     let state = Arc::new(AppState { db });
     let app = create_router(state);
 
-    // 1. Found
+    // 1. Found (not expired)
     let response = app.clone()
         .oneshot(
             Request::builder()
@@ -163,6 +241,19 @@ async fn test_api_redirect() -> anyhow::Result<()> {
         .oneshot(
             Request::builder()
                 .uri("/unknown")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // 3. Expired URL returns 404
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .uri("/old")
                 .body(Body::empty())
                 .unwrap(),
         )

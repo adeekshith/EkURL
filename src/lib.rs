@@ -9,6 +9,7 @@ use nanoid::nanoid;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_rusqlite::Connection;
 use tower_http::services::ServeDir;
 use url::Url;
@@ -26,29 +27,40 @@ pub struct Db {
 impl Db {
     pub async fn new(path: &str) -> anyhow::Result<Self> {
         let conn = Connection::open(path).await?;
-        
+
         conn.call(|conn| {
             // Enable WAL mode for concurrency
             conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-            
+
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS urls (
                     code TEXT PRIMARY KEY,
-                    url TEXT NOT NULL
+                    url TEXT NOT NULL,
+                    expires_at INTEGER
                 )",
                 [],
             )?;
+
+            // Migration: add expires_at column if missing (existing DBs)
+            let has_expires_at: bool = conn
+                .prepare("SELECT COUNT(*) FROM pragma_table_info('urls') WHERE name='expires_at'")?
+                .query_row([], |row| row.get::<_, i64>(0))
+                .map(|c| c > 0)?;
+            if !has_expires_at {
+                conn.execute("ALTER TABLE urls ADD COLUMN expires_at INTEGER", [])?;
+            }
+
             Ok::<_, rusqlite::Error>(())
         }).await?;
 
         Ok(Self { conn })
     }
 
-    pub async fn insert(&self, code: String, url: String) -> anyhow::Result<bool> {
+    pub async fn insert(&self, code: String, url: String, expires_at: Option<i64>) -> anyhow::Result<bool> {
         self.conn.call(move |conn| {
             match conn.execute(
-                "INSERT INTO urls (code, url) VALUES (?1, ?2)",
-                rusqlite::params![code, url],
+                "INSERT INTO urls (code, url, expires_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![code, url, expires_at],
             ) {
                 Ok(_) => Ok(true),
                 Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => Ok(false),
@@ -64,13 +76,16 @@ impl Db {
         Ok(count > 0)
     }
 
-    pub async fn list(&self) -> anyhow::Result<Vec<(String, String)>> {
+    pub async fn list(&self) -> anyhow::Result<Vec<(String, String, Option<i64>)>> {
         self.conn.call(|conn| {
-            let mut stmt = conn.prepare("SELECT code, url FROM urls")?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?))
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            let mut stmt = conn.prepare(
+                "SELECT code, url, expires_at FROM urls WHERE expires_at IS NULL OR expires_at > ?1"
+            )?;
+            let rows = stmt.query_map(rusqlite::params![now], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?;
-            
+
             let mut result = Vec::new();
             for row in rows {
                 result.push(row?);
@@ -81,15 +96,21 @@ impl Db {
 
     pub async fn count(&self) -> anyhow::Result<u64> {
         self.conn.call(|conn| {
-            Ok::<_, rusqlite::Error>(conn.query_row("SELECT COUNT(*) FROM urls", [], |row| row.get(0))?)
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            Ok::<_, rusqlite::Error>(conn.query_row(
+                "SELECT COUNT(*) FROM urls WHERE expires_at IS NULL OR expires_at > ?1",
+                rusqlite::params![now],
+                |row| row.get(0),
+            )?)
         }).await.map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn get_url(&self, code: String) -> anyhow::Result<Option<String>> {
         self.conn.call(move |conn| {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
             let url: Option<String> = conn.query_row(
-                "SELECT url FROM urls WHERE code = ?1",
-                rusqlite::params![code],
+                "SELECT url FROM urls WHERE code = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
+                rusqlite::params![code, now],
                 |row| row.get(0)
             ).optional()?;
             Ok::<_, rusqlite::Error>(url)
@@ -98,13 +119,26 @@ impl Db {
 
     pub async fn exists(&self, code: String) -> anyhow::Result<bool> {
         self.conn.call(move |conn| {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
             let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM urls WHERE code = ?1)",
-                rusqlite::params![code],
+                "SELECT EXISTS(SELECT 1 FROM urls WHERE code = ?1 AND (expires_at IS NULL OR expires_at > ?2))",
+                rusqlite::params![code, now],
                 |row| row.get(0)
             )?;
             Ok::<_, rusqlite::Error>(exists)
         }).await.map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn cleanup_expired(&self) -> anyhow::Result<u64> {
+        let count = self.conn.call(|conn| {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            let deleted = conn.execute(
+                "DELETE FROM urls WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+                rusqlite::params![now],
+            )?;
+            Ok::<_, rusqlite::Error>(deleted as u64)
+        }).await?;
+        Ok(count)
     }
 }
 
@@ -120,16 +154,37 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 pub struct ShortenRequest {
     pub url: String,
     pub custom_code: Option<String>,
+    pub expires_in: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct ShortenResponse {
     pub code: String,
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+pub fn parse_expires_in(expires_in: Option<&str>) -> Result<Option<i64>, String> {
+    let duration_secs = match expires_in.unwrap_or("1d") {
+        "30m" => Some(30 * 60),
+        "1h" => Some(60 * 60),
+        "1d" => Some(24 * 60 * 60),
+        "7d" => Some(7 * 24 * 60 * 60),
+        "never" => None,
+        other => return Err(format!("Invalid expires_in value: '{}'. Use 30m, 1h, 1d, 7d, or never", other)),
+    };
+
+    Ok(duration_secs.map(|secs| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + secs
+    }))
 }
 
 pub async fn shorten_api(
@@ -150,6 +205,11 @@ pub async fn shorten_api(
         }
     }
 
+    let expires_at = match parse_expires_in(payload.expires_in.as_deref()) {
+        Ok(ts) => ts,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: err })).into_response(),
+    };
+
     let is_custom = payload.custom_code.is_some();
     let code = if let Some(custom) = payload.custom_code {
         if let Err(err) = validate_custom_code(&custom) {
@@ -168,8 +228,8 @@ pub async fn shorten_api(
         }
     }
 
-    match state.db.insert(code.clone(), payload.url).await {
-        Ok(true) => (StatusCode::CREATED, Json(ShortenResponse { code })).into_response(),
+    match state.db.insert(code.clone(), payload.url, expires_at).await {
+        Ok(true) => (StatusCode::CREATED, Json(ShortenResponse { code, expires_at })).into_response(),
         Ok(false) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Failed to insert".to_string() })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -224,9 +284,40 @@ mod tests {
         assert!(is_same_domain(&url, "example.com"));
         assert!(is_same_domain(&url, "example.com:8080"));
         assert!(!is_same_domain(&url, "google.com"));
-        
+
         let local_url = Url::parse("http://localhost:8080/bar").unwrap();
         assert!(is_same_domain(&local_url, "localhost:8080"));
         assert!(is_same_domain(&local_url, "localhost"));
+    }
+
+    #[test]
+    fn test_parse_expires_in() {
+        // Default (None) -> 1 day from now
+        let result = parse_expires_in(None).unwrap();
+        assert!(result.is_some());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let diff = result.unwrap() - now;
+        assert!((86400 - 2..=86400).contains(&diff));
+
+        // Explicit values
+        let result = parse_expires_in(Some("30m")).unwrap();
+        let diff = result.unwrap() - now;
+        assert!((1800 - 2..=1800).contains(&diff));
+
+        let result = parse_expires_in(Some("1h")).unwrap();
+        let diff = result.unwrap() - now;
+        assert!((3600 - 2..=3600).contains(&diff));
+
+        let result = parse_expires_in(Some("7d")).unwrap();
+        let diff = result.unwrap() - now;
+        assert!((604800 - 2..=604800).contains(&diff));
+
+        // Never -> None
+        let result = parse_expires_in(Some("never")).unwrap();
+        assert!(result.is_none());
+
+        // Invalid
+        assert!(parse_expires_in(Some("5m")).is_err());
+        assert!(parse_expires_in(Some("")).is_err());
     }
 }
