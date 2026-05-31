@@ -8,42 +8,50 @@
 </head>
 <body>
     <div class="container">
-        
-        <div class="form-group">
-            <label for="url">Long URL</label>
-            <input type="url" id="url" placeholder="https://example.com/very-long-path" required>
-        </div>
-        
-        <div class="form-group">
-            <label for="custom_code">Custom Code (Optional)</label>
-            <input type="text" id="custom_code" placeholder="my-cool-link">
-        </div>
+        <form id="shorten-form" class="view" novalidate>
+            <div class="form-group">
+                <label for="url">Long URL</label>
+                <input type="url" id="url" placeholder="https://example.com/very-long-path" required autofocus>
+            </div>
 
-        <div class="form-group">
-            <label for="expires_in">Expires In</label>
-            <select id="expires_in">
-                <option value="1d">1 day</option>
-                <option value="7d" selected>7 days</option>
-                <option value="1mo">1 month</option>
-                <option value="3mo">3 months</option>
-                <option value="6mo">6 months</option>
-                <option value="1y">1 year</option>
-                <option value="never">Never</option>
-            </select>
-        </div>
+            <div class="form-group">
+                <label for="expires_in">Expires In</label>
+                <select id="expires_in">
+                    <option value="1d">1 day</option>
+                    <option value="7d" selected>7 days</option>
+                    <option value="1mo">1 month</option>
+                    <option value="3mo">3 months</option>
+                    <option value="6mo">6 months</option>
+                    <option value="1y">1 year</option>
+                    <option value="never">Never</option>
+                </select>
+            </div>
 
-        <button id="shorten-btn">Shorten URL</button>
+            <div class="form-group">
+                <label for="custom_code">Custom Code (Optional)</label>
+                <input type="text" id="custom_code" placeholder="my-cool-link">
+            </div>
 
-        <div id="error" class="error"></div>
+            <button id="shorten-btn" type="submit">Shorten URL</button>
 
-        <div id="result">
+            <div id="error" class="error" role="alert" aria-live="polite"></div>
+        </form>
+
+        <section id="result" class="view" hidden>
             <div class="result-header">Your short link is ready</div>
-            <a id="short-link" href="" target="_blank"></a>
+            <a id="short-link" href="" target="_blank" rel="noopener"></a>
             <div id="expiry-info" class="expiry-info"></div>
-            <button id="copy-btn">Copy to Clipboard</button>
-        </div>
+            <canvas id="qr-canvas" width="180" height="180" aria-label="QR code for the short link"></canvas>
+            <div class="action-row">
+                <button id="copy-btn" type="button" class="secondary">Copy</button>
+                <button id="open-btn" type="button" class="secondary">Open</button>
+                <button id="share-btn" type="button" class="secondary" hidden>Share</button>
+            </div>
+            <button id="reset-btn" type="button" class="link-btn">Shorten another</button>
+        </section>
     </div>
 
-    <script src="./js/app.js"></script>
+    <script src="./js/qrcode.js" defer></script>
+    <script src="./js/app.js" defer></script>
 </body>
 </html>

@@ -30,8 +30,10 @@ body {
     display: flex;
     justify-content: center;
     align-items: center;
-    height: 100vh;
+    min-height: 100vh;
     margin: 0;
+    padding: 1rem;
+    box-sizing: border-box;
     transition: background-color 0.3s, color 0.3s;
 }
 
@@ -45,13 +47,7 @@ body {
     transition: background-color 0.3s, box-shadow 0.3s;
 }
 
-h1 { 
-    margin-top: 0; 
-    font-size: 1.875rem; 
-    font-weight: 700;
-    text-align: center;
-    color: var(--primary);
-}
+[hidden] { display: none !important; }
 
 .form-group { margin-bottom: 1.25rem; }
 
@@ -123,14 +119,17 @@ button:hover { background-color: var(--primary-hover); }
 button:active { transform: translateY(1px); }
 
 #result {
-    margin-top: 1.5rem;
-    padding: 1rem;
+    padding: 1.25rem;
     background: var(--result-bg);
     border-radius: 0.5rem;
-    display: none;
     word-break: break-all;
     border: 1px dashed var(--border);
     transition: background-color 0.3s;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 0.75rem;
 }
 
 .result-header {
@@ -138,39 +137,74 @@ button:active { transform: translateY(1px); }
     text-transform: uppercase;
     font-weight: 700;
     color: var(--text-muted);
-    margin-bottom: 0.5rem;
+    letter-spacing: 0.05em;
 }
 
 #short-link {
     color: var(--link);
     text-decoration: none;
     font-weight: 600;
+    font-size: 1.125rem;
 }
 
 #short-link:hover { text-decoration: underline; }
 
 .expiry-info {
-    display: none;
-    margin-top: 0.5rem;
+    margin: 0;
     font-size: 0.8rem;
     color: var(--text-muted);
 }
 
-#copy-btn {
-    margin-top: 1rem;
+#qr-canvas {
+    background: white;
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+    width: 180px;
+    height: 180px;
+}
+
+.action-row {
+    display: flex;
+    gap: 0.5rem;
+    width: 100%;
+    margin-top: 0.25rem;
+}
+
+.action-row .secondary {
+    flex: 1;
     background-color: var(--text-muted);
     font-size: 0.875rem;
     padding: 0.5rem;
+    margin: 0;
 }
 
-#copy-btn:hover {
-    background-color: var(--text);
+.action-row .secondary:hover { background-color: var(--text); }
+
+.link-btn {
+    background: none;
+    color: var(--primary);
+    padding: 0.25rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    width: auto;
+    margin-top: 0.25rem;
 }
 
-.error { 
-    color: var(--error); 
-    margin-top: 0.75rem; 
-    font-size: 0.875rem; 
+.link-btn:hover {
+    background: none;
+    text-decoration: underline;
+}
+
+.error {
+    color: var(--error);
+    margin-top: 0.75rem;
+    font-size: 0.875rem;
     text-align: center;
     font-weight: 500;
+    min-height: 1.25rem;
+}
+
+@media (max-width: 480px) {
+    .container { padding: 1.5rem; }
+    #qr-canvas { width: 160px; height: 160px; }
 }
