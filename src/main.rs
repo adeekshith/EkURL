@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
-use ekurl::{create_router, parse_expires_in, AppState, Db};
-use nanoid::nanoid;
+use ekurl::{create_router, generate_and_insert, parse_expires_in, AppState, Db};
 use std::env;
 use std::sync::Arc;
 use url::Url;
@@ -26,8 +25,8 @@ enum Commands {
         /// Optional custom code
         #[arg(long)]
         code: Option<String>,
-        /// Expiry duration: 30m, 1h, 1d, 7d, or never (default: 1d)
-        #[arg(long, default_value = "1d")]
+        /// Expiry duration: 1d, 7d, 1mo, 3mo, 6mo, 1y, or never (default: 7d)
+        #[arg(long, default_value = "7d")]
         expires_in: String,
     },
     /// Remove a short link by its code
@@ -98,25 +97,30 @@ async fn handle_add(url: String, custom_code: Option<String>, expires_in: String
         }
     };
 
-    let code = custom_code.unwrap_or_else(|| nanoid!(7));
-
     std::fs::create_dir_all("data")?;
     let db = Db::new(DB_PATH).await?;
 
-    match db.insert(code.clone(), url.clone(), expires_at).await {
-        Ok(true) => {
+    let result = if let Some(code) = custom_code {
+        db.insert(code.clone(), url.clone(), expires_at).await.map(|ok| ok.then_some(code))
+    } else {
+        generate_and_insert(&db, url.clone(), expires_at).await
+    };
+
+    match result {
+        Ok(Some(code)) => {
             let expiry_msg = match expires_at {
                 Some(ts) => format!(" (expires: {})", ts),
                 None => " (never expires)".to_string(),
             };
             println!("Success: {} -> {}{}", code, url, expiry_msg);
         }
-        Ok(false) => {
-             eprintln!("Error: Code '{}' updated (was already present)", code);
+        Ok(None) => {
+            eprintln!("Error: Code already in use or could not generate a unique code");
+            std::process::exit(1);
         }
         Err(e) => {
-             eprintln!("Error: {}", e);
-             std::process::exit(1);
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
         }
     }
     Ok(())
