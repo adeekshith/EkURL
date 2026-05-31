@@ -169,13 +169,16 @@ pub struct ErrorResponse {
 }
 
 pub fn parse_expires_in(expires_in: Option<&str>) -> Result<Option<i64>, String> {
-    let duration_secs = match expires_in.unwrap_or("1d") {
-        "30m" => Some(30 * 60),
-        "1h" => Some(60 * 60),
-        "1d" => Some(24 * 60 * 60),
-        "7d" => Some(7 * 24 * 60 * 60),
+    const DAY: i64 = 24 * 60 * 60;
+    let duration_secs = match expires_in.unwrap_or("7d") {
+        "1d" => Some(DAY),
+        "7d" => Some(7 * DAY),
+        "1mo" => Some(30 * DAY),
+        "3mo" => Some(90 * DAY),
+        "6mo" => Some(180 * DAY),
+        "1y" => Some(365 * DAY),
         "never" => None,
-        other => return Err(format!("Invalid expires_in value: '{}'. Use 30m, 1h, 1d, 7d, or never", other)),
+        other => return Err(format!("Invalid expires_in value: '{}'. Use 1d, 7d, 1mo, 3mo, 6mo, 1y, or never", other)),
     };
 
     Ok(duration_secs.map(|secs| {
@@ -185,6 +188,44 @@ pub fn parse_expires_in(expires_in: Option<&str>) -> Result<Option<i64>, String>
             .as_secs() as i64
             + secs
     }))
+}
+
+/// Determine the code length to use for a given attempt number when
+/// auto-generating a short code. Starts at the minimum length and bumps
+/// up after a fixed number of consecutive collisions at the current length.
+pub fn code_length_for_attempt(attempt: usize) -> usize {
+    const MIN_LEN: usize = 3;
+    const RETRIES_PER_LEN: usize = 2;
+    MIN_LEN + (attempt / RETRIES_PER_LEN)
+}
+
+const MAX_GENERATE_ATTEMPTS: usize = 20;
+
+/// Alphabet for auto-generated short codes: lowercase letters and digits.
+const CODE_ALPHABET: [char; 36] = [
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+];
+
+/// Generate a short code and insert it into the DB, retrying on collisions
+/// and bumping the code length after a couple of failures at the current
+/// length. Returns `Ok(Some(code))` on success, `Ok(None)` if all attempts
+/// were exhausted.
+pub async fn generate_and_insert(
+    db: &Db,
+    url: String,
+    expires_at: Option<i64>,
+) -> anyhow::Result<Option<String>> {
+    for attempt in 0..MAX_GENERATE_ATTEMPTS {
+        let len = code_length_for_attempt(attempt);
+        let code = nanoid!(len, &CODE_ALPHABET);
+        match db.insert(code.clone(), url.clone(), expires_at).await? {
+            true => return Ok(Some(code)),
+            false => continue,
+        }
+    }
+    Ok(None)
 }
 
 pub async fn shorten_api(
@@ -210,27 +251,20 @@ pub async fn shorten_api(
         Err(err) => return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: err })).into_response(),
     };
 
-    let is_custom = payload.custom_code.is_some();
-    let code = if let Some(custom) = payload.custom_code {
+    if let Some(custom) = payload.custom_code {
         if let Err(err) = validate_custom_code(&custom) {
             return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: err })).into_response();
         }
-        custom
-    } else {
-        nanoid!(7)
-    };
-
-    if is_custom {
-        match state.db.exists(code.clone()).await {
-            Ok(true) => return (StatusCode::CONFLICT, Json(ErrorResponse { error: "Code already in use".to_string() })).into_response(),
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            _ => {}
-        }
+        return match state.db.insert(custom.clone(), payload.url, expires_at).await {
+            Ok(true) => (StatusCode::CREATED, Json(ShortenResponse { code: custom, expires_at })).into_response(),
+            Ok(false) => (StatusCode::CONFLICT, Json(ErrorResponse { error: "Code already in use".to_string() })).into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
     }
 
-    match state.db.insert(code.clone(), payload.url, expires_at).await {
-        Ok(true) => (StatusCode::CREATED, Json(ShortenResponse { code, expires_at })).into_response(),
-        Ok(false) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Failed to insert".to_string() })).into_response(),
+    match generate_and_insert(&state.db, payload.url, expires_at).await {
+        Ok(Some(code)) => (StatusCode::CREATED, Json(ShortenResponse { code, expires_at })).into_response(),
+        Ok(None) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Could not generate unique code".to_string() })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -292,32 +326,97 @@ mod tests {
 
     #[test]
     fn test_parse_expires_in() {
-        // Default (None) -> 1 day from now
+        const DAY: i64 = 86400;
+        // Default (None) -> 7 days from now
         let result = parse_expires_in(None).unwrap();
         assert!(result.is_some());
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
         let diff = result.unwrap() - now;
-        assert!((86400 - 2..=86400).contains(&diff));
+        assert!((7 * DAY - 2..=7 * DAY).contains(&diff));
 
         // Explicit values
-        let result = parse_expires_in(Some("30m")).unwrap();
-        let diff = result.unwrap() - now;
-        assert!((1800 - 2..=1800).contains(&diff));
-
-        let result = parse_expires_in(Some("1h")).unwrap();
-        let diff = result.unwrap() - now;
-        assert!((3600 - 2..=3600).contains(&diff));
-
-        let result = parse_expires_in(Some("7d")).unwrap();
-        let diff = result.unwrap() - now;
-        assert!((604800 - 2..=604800).contains(&diff));
+        let cases = [
+            ("1d", DAY),
+            ("7d", 7 * DAY),
+            ("1mo", 30 * DAY),
+            ("3mo", 90 * DAY),
+            ("6mo", 180 * DAY),
+            ("1y", 365 * DAY),
+        ];
+        for (input, expected) in cases {
+            let result = parse_expires_in(Some(input)).unwrap();
+            let diff = result.unwrap() - now;
+            assert!(
+                (expected - 2..=expected).contains(&diff),
+                "expires_in={} produced diff={}, expected ~{}", input, diff, expected
+            );
+        }
 
         // Never -> None
         let result = parse_expires_in(Some("never")).unwrap();
         assert!(result.is_none());
 
-        // Invalid
+        // Removed values are now invalid
+        assert!(parse_expires_in(Some("30m")).is_err());
+        assert!(parse_expires_in(Some("1h")).is_err());
+
+        // Other invalid values
         assert!(parse_expires_in(Some("5m")).is_err());
         assert!(parse_expires_in(Some("")).is_err());
+    }
+
+    #[test]
+    fn test_code_length_for_attempt() {
+        // First two attempts use the minimum length of 3, then bump by 1
+        // after every two consecutive collisions.
+        assert_eq!(code_length_for_attempt(0), 3);
+        assert_eq!(code_length_for_attempt(1), 3);
+        assert_eq!(code_length_for_attempt(2), 4);
+        assert_eq!(code_length_for_attempt(3), 4);
+        assert_eq!(code_length_for_attempt(4), 5);
+        assert_eq!(code_length_for_attempt(5), 5);
+        assert_eq!(code_length_for_attempt(10), 8);
+    }
+
+    #[tokio::test]
+    async fn test_generate_and_insert_uses_min_length_on_first_attempt() {
+        let db = Db::new(":memory:").await.unwrap();
+        let code = generate_and_insert(&db, "https://example.com".to_string(), None)
+            .await
+            .unwrap()
+            .expect("should generate a code");
+        assert_eq!(code.len(), 3, "first successful code should be at min length 3");
+        assert_eq!(
+            db.get_url(code.clone()).await.unwrap().as_deref(),
+            Some("https://example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_and_insert_uses_lowercase_alphanumeric_alphabet() {
+        let db = Db::new(":memory:").await.unwrap();
+        for i in 0..50 {
+            let code = generate_and_insert(&db, format!("https://example.com/{}", i), None)
+                .await
+                .unwrap()
+                .expect("should generate a code");
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "generated code '{}' must only contain a-z0-9", code
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generate_and_insert_succeeds_under_contention() {
+        let db = Db::new(":memory:").await.unwrap();
+        for _ in 0..50 {
+            let _ = db.insert(nanoid!(3, &CODE_ALPHABET), "https://x".to_string(), None).await;
+        }
+        let code = generate_and_insert(&db, "https://example.com".to_string(), None)
+            .await
+            .unwrap()
+            .expect("should still generate a code");
+        assert!((3..=12).contains(&code.len()));
     }
 }

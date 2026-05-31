@@ -104,12 +104,16 @@ async fn test_api_shorten() -> anyhow::Result<()> {
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let json: ShortenResponse = serde_json::from_slice(&body)?;
-    assert!(!json.code.is_empty());
-    // Default expiry should be ~1 day from now
+    // Fresh DB -> first auto-generated code should be the minimum length (3).
+    assert_eq!(json.code.len(), 3);
+    // Auto-generated codes must only use lowercase letters and digits.
+    assert!(json.code.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    // Default expiry should be ~7 days from now
     assert!(json.expires_at.is_some());
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
     let diff = json.expires_at.unwrap() - now;
-    assert!((86000..=86400).contains(&diff));
+    const SEVEN_DAYS: i64 = 7 * 86400;
+    assert!((SEVEN_DAYS - 5..=SEVEN_DAYS).contains(&diff));
 
     // 2. Invalid URL
     let response = app.clone()
@@ -204,6 +208,53 @@ async fn test_api_shorten() -> anyhow::Result<()> {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // 8. Removed expires_in values (30m, 1h) are now rejected
+    for removed in ["30m", "1h"] {
+        let body = format!(r#"{{"url": "https://example.com", "expires_in": "{}"}}"#, removed);
+        let response = app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shorten")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "expires_in='{}' should be rejected", removed);
+    }
+
+    // 9. New long-duration expires_in values produce roughly correct timestamps
+    const DAY: i64 = 86400;
+    let cases = [("1mo", 30 * DAY), ("3mo", 90 * DAY), ("6mo", 180 * DAY), ("1y", 365 * DAY)];
+    for (input, expected_secs) in cases {
+        let body = format!(
+            r#"{{"url": "https://example.com/{}", "expires_in": "{}"}}"#,
+            input, input
+        );
+        let response = app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shorten")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED, "expires_in='{}' should succeed", input);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let json: ShortenResponse = serde_json::from_slice(&body)?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let diff = json.expires_at.expect("should have expiry") - now;
+        assert!(
+            (expected_secs - 5..=expected_secs).contains(&diff),
+            "expires_in='{}' produced diff={}, expected ~{}", input, diff, expected_secs
+        );
+    }
 
     Ok(())
 }

@@ -112,16 +112,24 @@ docker exec -it <container_name> ekurl count
 ```json
 {
   "url": "https://example.com/very-long-url",
-  "custom_code": "my-link" (optional)
+  "custom_code": "my-link",
+  "expires_in": "1d"
 }
 ```
+
+`custom_code` and `expires_in` are optional. Valid `expires_in` values: `1d`, `7d` (default), `1mo`, `3mo`, `6mo`, `1y`, `never`.
+
+If `custom_code` is omitted, a code is auto-generated from lowercase letters and digits (`a-z0-9`), starting at 3 characters. The length is bumped up after repeated collisions.
 
 **Response (201 Created):**
 ```json
 {
-  "code": "my-link"
+  "code": "my-link",
+  "expires_at": 1735689600
 }
 ```
+
+`expires_at` is a Unix timestamp, or `null` if `expires_in` was `never`.
 
 ## GitHub Actions
 The project includes a workflow to automatically build and push the Docker image to GHCR when a new tag starting with `v` (e.g., `v1.0.0`) is pushed.
