@@ -1,8 +1,10 @@
 use axum::{
     body::Body,
+    extract::ConnectInfo,
     http::{Request, StatusCode},
 };
-use ekurl::{create_router, AppState, Db, ShortenResponse};
+use ekurl::{AppState, Db, ShortenResponse, create_router, create_router_with_rate_limit};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower::util::ServiceExt;
@@ -15,8 +17,14 @@ async fn test_db_operations() -> anyhow::Result<()> {
     // 1. Insert (with expiry far in future)
     let code = "test1".to_string();
     let url = "https://example.com".to_string();
-    let future_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 + 86400;
-    let inserted = db.insert(code.clone(), url.clone(), Some(future_ts)).await?;
+    let future_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 86400;
+    let inserted = db
+        .insert(code.clone(), url.clone(), Some(future_ts))
+        .await?;
     assert!(inserted, "Should insert new URL");
 
     // 2. Get
@@ -56,8 +64,17 @@ async fn test_db_expiry() -> anyhow::Result<()> {
     let db = Db::new(":memory:").await?;
 
     // Insert an already-expired URL
-    let past_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 - 10;
-    db.insert("expired".to_string(), "https://example.com".to_string(), Some(past_ts)).await?;
+    let past_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - 10;
+    db.insert(
+        "expired".to_string(),
+        "https://example.com".to_string(),
+        Some(past_ts),
+    )
+    .await?;
 
     // Should not be retrievable
     assert_eq!(db.get_url("expired".to_string()).await?, None);
@@ -66,8 +83,16 @@ async fn test_db_expiry() -> anyhow::Result<()> {
     assert!(db.list().await?.is_empty());
 
     // Insert a never-expiring URL
-    db.insert("forever".to_string(), "https://example.com".to_string(), None).await?;
-    assert_eq!(db.get_url("forever".to_string()).await?, Some("https://example.com".to_string()));
+    db.insert(
+        "forever".to_string(),
+        "https://example.com".to_string(),
+        None,
+    )
+    .await?;
+    assert_eq!(
+        db.get_url("forever".to_string()).await?,
+        Some("https://example.com".to_string())
+    );
     assert!(db.exists("forever".to_string()).await?);
     assert_eq!(db.count().await?, 1);
 
@@ -88,7 +113,8 @@ async fn test_api_shorten() -> anyhow::Result<()> {
     let app = create_router(state);
 
     // 1. Valid Shorten (default expiry = 1d)
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -107,16 +133,24 @@ async fn test_api_shorten() -> anyhow::Result<()> {
     // Fresh DB -> first auto-generated code should be the minimum length (3).
     assert_eq!(json.code.len(), 3);
     // Auto-generated codes must only use lowercase letters and digits.
-    assert!(json.code.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    assert!(
+        json.code
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    );
     // Default expiry should be ~7 days from now
     assert!(json.expires_at.is_some());
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
     let diff = json.expires_at.unwrap() - now;
     const SEVEN_DAYS: i64 = 7 * 86400;
     assert!((SEVEN_DAYS - 5..=SEVEN_DAYS).contains(&diff));
 
     // 2. Invalid URL
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -131,13 +165,16 @@ async fn test_api_shorten() -> anyhow::Result<()> {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     // 3. Custom Code
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/shorten")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"url": "https://google.com", "custom_code": "google"}"#))
+                .body(Body::from(
+                    r#"{"url": "https://google.com", "custom_code": "google"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -146,13 +183,16 @@ async fn test_api_shorten() -> anyhow::Result<()> {
     assert_eq!(response.status(), StatusCode::CREATED);
 
     // 4. Duplicate Custom Code
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/shorten")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"url": "https://other.com", "custom_code": "google"}"#))
+                .body(Body::from(
+                    r#"{"url": "https://other.com", "custom_code": "google"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -161,7 +201,8 @@ async fn test_api_shorten() -> anyhow::Result<()> {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 
     // 5. Same Domain Restriction
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -177,13 +218,16 @@ async fn test_api_shorten() -> anyhow::Result<()> {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     // 6. Never-expiring URL
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/shorten")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"url": "https://forever.com", "expires_in": "never"}"#))
+                .body(Body::from(
+                    r#"{"url": "https://forever.com", "expires_in": "never"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -195,13 +239,16 @@ async fn test_api_shorten() -> anyhow::Result<()> {
     assert!(json.expires_at.is_none());
 
     // 7. Invalid expires_in value
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/shorten")
                 .header("Content-Type", "application/json")
-                .body(Body::from(r#"{"url": "https://example.com", "expires_in": "5m"}"#))
+                .body(Body::from(
+                    r#"{"url": "https://example.com", "expires_in": "5m"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -211,8 +258,12 @@ async fn test_api_shorten() -> anyhow::Result<()> {
 
     // 8. Removed expires_in values (30m, 1h) are now rejected
     for removed in ["30m", "1h"] {
-        let body = format!(r#"{{"url": "https://example.com", "expires_in": "{}"}}"#, removed);
-        let response = app.clone()
+        let body = format!(
+            r#"{{"url": "https://example.com", "expires_in": "{}"}}"#,
+            removed
+        );
+        let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -223,18 +274,29 @@ async fn test_api_shorten() -> anyhow::Result<()> {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "expires_in='{}' should be rejected", removed);
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "expires_in='{}' should be rejected",
+            removed
+        );
     }
 
     // 9. New long-duration expires_in values produce roughly correct timestamps
     const DAY: i64 = 86400;
-    let cases = [("1mo", 30 * DAY), ("3mo", 90 * DAY), ("6mo", 180 * DAY), ("1y", 365 * DAY)];
+    let cases = [
+        ("1mo", 30 * DAY),
+        ("3mo", 90 * DAY),
+        ("6mo", 180 * DAY),
+        ("1y", 365 * DAY),
+    ];
     for (input, expected_secs) in cases {
         let body = format!(
             r#"{{"url": "https://example.com/{}", "expires_in": "{}"}}"#,
             input, input
         );
-        let response = app.clone()
+        let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -245,14 +307,25 @@ async fn test_api_shorten() -> anyhow::Result<()> {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED, "expires_in='{}' should succeed", input);
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "expires_in='{}' should succeed",
+            input
+        );
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
         let json: ShortenResponse = serde_json::from_slice(&body)?;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let diff = json.expires_at.expect("should have expiry") - now;
         assert!(
             (expected_secs - 5..=expected_secs).contains(&diff),
-            "expires_in='{}' produced diff={}, expected ~{}", input, diff, expected_secs
+            "expires_in='{}' produced diff={}, expected ~{}",
+            input,
+            diff,
+            expected_secs
         );
     }
 
@@ -263,32 +336,50 @@ async fn test_api_shorten() -> anyhow::Result<()> {
 async fn test_api_redirect() -> anyhow::Result<()> {
     let db = Db::new(":memory:").await?;
     // Insert with future expiry
-    let future_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 + 86400;
-    db.insert("rust".to_string(), "https://rust-lang.org".to_string(), Some(future_ts)).await?;
+    let future_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 86400;
+    db.insert(
+        "rust".to_string(),
+        "https://rust-lang.org".to_string(),
+        Some(future_ts),
+    )
+    .await?;
 
     // Insert an expired URL
-    let past_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 - 10;
-    db.insert("old".to_string(), "https://old.com".to_string(), Some(past_ts)).await?;
+    let past_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - 10;
+    db.insert(
+        "old".to_string(),
+        "https://old.com".to_string(),
+        Some(past_ts),
+    )
+    .await?;
 
     let state = Arc::new(AppState { db });
     let app = create_router(state);
 
     // 1. Found (not expired)
-    let response = app.clone()
-        .oneshot(
-            Request::builder()
-                .uri("/rust")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri("/rust").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-    assert_eq!(response.headers().get("location").unwrap(), "https://rust-lang.org");
+    assert_eq!(
+        response.headers().get("location").unwrap(),
+        "https://rust-lang.org"
+    );
 
     // 2. Not Found
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/unknown")
@@ -301,17 +392,136 @@ async fn test_api_redirect() -> anyhow::Result<()> {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     // 3. Expired URL returns 404
-    let response = app.clone()
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri("/old").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_rejects_dangerous_schemes() -> anyhow::Result<()> {
+    let db = Db::new(":memory:").await?;
+    let app = create_router(Arc::new(AppState { db }));
+
+    for bad in [
+        "javascript:alert(1)",
+        "data:text/html,<h1>hi</h1>",
+        "ftp://example.com/file",
+        "file:///etc/passwd",
+    ] {
+        let body = format!(r#"{{"url": "{}"}}"#, bad);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shorten")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "scheme in '{}' should be rejected",
+            bad
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_rejects_overlong_url() -> anyhow::Result<()> {
+    let db = Db::new(":memory:").await?;
+    let app = create_router(Arc::new(AppState { db }));
+
+    let long = format!("https://example.com/{}", "a".repeat(3000));
+    let body = format!(r#"{{"url": "{}"}}"#, long);
+    let response = app
         .oneshot(
             Request::builder()
-                .uri("/old")
-                .body(Body::empty())
+                .method("POST")
+                .uri("/api/v1/shorten")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_security_headers_present() -> anyhow::Result<()> {
+    let db = Db::new(":memory:").await?;
+    let app = create_router(Arc::new(AppState { db }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/shorten")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"url": "https://example.com"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let headers = response.headers();
+    assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+    assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
+    assert!(headers.get("content-security-policy").is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_rate_limit_returns_429() -> anyhow::Result<()> {
+    let db = Db::new(":memory:").await?;
+    let app = create_router_with_rate_limit(Arc::new(AppState { db }));
+    let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+    // Fire more requests than the burst allows, all from the same peer IP.
+    let mut statuses = Vec::new();
+    for _ in 0..15 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shorten")
+                    .header("Content-Type", "application/json")
+                    .extension(ConnectInfo(addr))
+                    .body(Body::from(
+                        r#"{"url": "https://example.com", "expires_in": "never"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        statuses.push(response.status());
+    }
+
+    // The first request is within the burst and should succeed.
+    assert_eq!(statuses[0], StatusCode::CREATED);
+    // Once the burst is exhausted, the limiter must reject some requests.
+    assert!(
+        statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "expected at least one 429 among rapid requests, got {:?}",
+        statuses
+    );
 
     Ok(())
 }

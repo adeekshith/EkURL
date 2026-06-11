@@ -1,9 +1,9 @@
 use axum::{
+    Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
-    Json, Router,
 };
 use nanoid::nanoid;
 use rusqlite::OptionalExtension;
@@ -11,8 +11,23 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_rusqlite::Connection;
+use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use url::Url;
+
+/// Current Unix time in seconds. Falls back to `0` (and logs) if the system
+/// clock is set before the Unix epoch, rather than panicking like a bare
+/// `unwrap()` would.
+pub fn now_secs() -> i64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(_) => {
+            tracing::error!("system clock is before UNIX_EPOCH; falling back to 0");
+            0
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -50,76 +65,107 @@ impl Db {
                 conn.execute("ALTER TABLE urls ADD COLUMN expires_at INTEGER", [])?;
             }
 
+            // Index expiry so reads and cleanup don't full-scan as the table grows.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_urls_expires_at ON urls(expires_at)",
+                [],
+            )?;
+
             Ok::<_, rusqlite::Error>(())
-        }).await?;
+        })
+        .await?;
 
         Ok(Self { conn })
     }
 
-    pub async fn insert(&self, code: String, url: String, expires_at: Option<i64>) -> anyhow::Result<bool> {
-        self.conn.call(move |conn| {
-            match conn.execute(
-                "INSERT INTO urls (code, url, expires_at) VALUES (?1, ?2, ?3)",
-                rusqlite::params![code, url, expires_at],
-            ) {
-                Ok(_) => Ok(true),
-                Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => Ok(false),
-                Err(e) => Err(tokio_rusqlite::Error::Error(e)),
-            }
-        }).await.map_err(|e| anyhow::anyhow!(e))
+    pub async fn insert(
+        &self,
+        code: String,
+        url: String,
+        expires_at: Option<i64>,
+    ) -> anyhow::Result<bool> {
+        self.conn
+            .call(move |conn| {
+                match conn.execute(
+                    "INSERT INTO urls (code, url, expires_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![code, url, expires_at],
+                ) {
+                    Ok(_) => Ok(true),
+                    Err(rusqlite::Error::SqliteFailure(e, _))
+                        if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+                    {
+                        Ok(false)
+                    }
+                    Err(e) => Err(tokio_rusqlite::Error::Error(e)),
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn delete(&self, code: String) -> anyhow::Result<bool> {
-        let count = self.conn.call(move |conn| {
-            Ok::<_, rusqlite::Error>(conn.execute("DELETE FROM urls WHERE code = ?1", rusqlite::params![code])?)
-        }).await?;
+        let count = self
+            .conn
+            .call(move |conn| {
+                conn.execute("DELETE FROM urls WHERE code = ?1", rusqlite::params![code])
+            })
+            .await?;
         Ok(count > 0)
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<(String, String, Option<i64>)>> {
-        self.conn.call(|conn| {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-            let mut stmt = conn.prepare(
+        self.conn
+            .call(|conn| {
+                let now = now_secs();
+                let mut stmt = conn.prepare(
                 "SELECT code, url, expires_at FROM urls WHERE expires_at IS NULL OR expires_at > ?1"
             )?;
-            let rows = stmt.query_map(rusqlite::params![now], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+                let rows = stmt.query_map(rusqlite::params![now], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
 
-            let mut result = Vec::new();
-            for row in rows {
-                result.push(row?);
-            }
-            Ok::<_, rusqlite::Error>(result)
-        }).await.map_err(|e| anyhow::anyhow!(e))
+                let mut result = Vec::new();
+                for row in rows {
+                    result.push(row?);
+                }
+                Ok::<_, rusqlite::Error>(result)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn count(&self) -> anyhow::Result<u64> {
-        self.conn.call(|conn| {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-            Ok::<_, rusqlite::Error>(conn.query_row(
-                "SELECT COUNT(*) FROM urls WHERE expires_at IS NULL OR expires_at > ?1",
-                rusqlite::params![now],
-                |row| row.get(0),
-            )?)
-        }).await.map_err(|e| anyhow::anyhow!(e))
+        self.conn
+            .call(|conn| {
+                let now = now_secs();
+                conn.query_row(
+                    "SELECT COUNT(*) FROM urls WHERE expires_at IS NULL OR expires_at > ?1",
+                    rusqlite::params![now],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn get_url(&self, code: String) -> anyhow::Result<Option<String>> {
-        self.conn.call(move |conn| {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-            let url: Option<String> = conn.query_row(
+        self.conn
+            .call(move |conn| {
+                let now = now_secs();
+                let url: Option<String> = conn.query_row(
                 "SELECT url FROM urls WHERE code = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
                 rusqlite::params![code, now],
                 |row| row.get(0)
             ).optional()?;
-            Ok::<_, rusqlite::Error>(url)
-        }).await.map_err(|e| anyhow::anyhow!(e))
+                Ok::<_, rusqlite::Error>(url)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn exists(&self, code: String) -> anyhow::Result<bool> {
         self.conn.call(move |conn| {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            let now = now_secs();
             let exists: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM urls WHERE code = ?1 AND (expires_at IS NULL OR expires_at > ?2))",
                 rusqlite::params![code, now],
@@ -130,24 +176,89 @@ impl Db {
     }
 
     pub async fn cleanup_expired(&self) -> anyhow::Result<u64> {
-        let count = self.conn.call(|conn| {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-            let deleted = conn.execute(
-                "DELETE FROM urls WHERE expires_at IS NOT NULL AND expires_at <= ?1",
-                rusqlite::params![now],
-            )?;
-            Ok::<_, rusqlite::Error>(deleted as u64)
-        }).await?;
+        let count = self
+            .conn
+            .call(|conn| {
+                let now = now_secs();
+                let deleted = conn.execute(
+                    "DELETE FROM urls WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+                    rusqlite::params![now],
+                )?;
+                Ok::<_, rusqlite::Error>(deleted as u64)
+            })
+            .await?;
         Ok(count)
     }
 }
 
+/// Per-IP rate limit for the shorten endpoint: allow a burst of this many
+/// requests, replenishing one slot every `RATE_LIMIT_REFILL_SECS` seconds.
+const RATE_LIMIT_BURST: u32 = 10;
+const RATE_LIMIT_REFILL_SECS: u64 = 2;
+
+/// Layer common security response headers onto every route (including static
+/// assets). `script-src 'self'` is the meaningful XSS guard for the bundled UI,
+/// which loads only same-origin CSS/JS.
+fn with_security_headers<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    const CSP: &str = "default-src 'self'; img-src 'self' data:; \
+        style-src 'self' 'unsafe-inline'; script-src 'self'; \
+        base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+    router
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CSP),
+        ))
+}
+
+/// Router without rate limiting. Used by tests, which drive it directly via
+/// `oneshot` (no connection info to key a rate limiter on).
 pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/api/v1/shorten", post(shorten_api))
-        .route("/{code}", get(redirect_url))
-        .fallback_service(ServeDir::new("static"))
-        .with_state(state)
+    with_security_headers(
+        Router::new()
+            .route("/api/v1/shorten", post(shorten_api))
+            .route("/{code}", get(redirect_url))
+            .fallback_service(ServeDir::new("static")),
+    )
+    .with_state(state)
+}
+
+/// Production router: same as [`create_router`] but with a per-IP rate limiter
+/// on the shorten endpoint. Redirects and static assets stay unthrottled.
+/// Requires the server to be run with
+/// `into_make_service_with_connect_info::<SocketAddr>()` so the peer IP is
+/// available to the limiter.
+pub fn create_router_with_rate_limit(state: Arc<AppState>) -> Router {
+    let governor_conf = GovernorConfigBuilder::default()
+        .per_second(RATE_LIMIT_REFILL_SECS)
+        .burst_size(RATE_LIMIT_BURST)
+        .finish()
+        .expect("valid rate-limit configuration");
+
+    with_security_headers(
+        Router::new()
+            .route(
+                "/api/v1/shorten",
+                post(shorten_api).layer(GovernorLayer::new(governor_conf)),
+            )
+            .route("/{code}", get(redirect_url))
+            .fallback_service(ServeDir::new("static")),
+    )
+    .with_state(state)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -178,16 +289,15 @@ pub fn parse_expires_in(expires_in: Option<&str>) -> Result<Option<i64>, String>
         "6mo" => Some(180 * DAY),
         "1y" => Some(365 * DAY),
         "never" => None,
-        other => return Err(format!("Invalid expires_in value: '{}'. Use 1d, 7d, 1mo, 3mo, 6mo, 1y, or never", other)),
+        other => {
+            return Err(format!(
+                "Invalid expires_in value: '{}'. Use 1d, 7d, 1mo, 3mo, 6mo, 1y, or never",
+                other
+            ));
+        }
     };
 
-    Ok(duration_secs.map(|secs| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64
-            + secs
-    }))
+    Ok(duration_secs.map(|secs| now_secs() + secs))
 }
 
 /// Determine the code length to use for a given attempt number when
@@ -203,9 +313,8 @@ const MAX_GENERATE_ATTEMPTS: usize = 20;
 
 /// Alphabet for auto-generated short codes: lowercase letters and digits.
 const CODE_ALPHABET: [char; 36] = [
-    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
-    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's',
+    't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
 ];
 
 /// Generate a short code and insert it into the DB, retrying on collisions
@@ -228,44 +337,121 @@ pub async fn generate_and_insert(
     Ok(None)
 }
 
+/// Maximum accepted length of a URL to shorten. Guards against giant payloads
+/// (e.g. multi-megabyte `data:` URLs) being persisted.
+pub const MAX_URL_LEN: usize = 2048;
+
+/// Validate a URL submitted for shortening: it must be within the length limit
+/// and a well-formed `http`/`https` URL. Returns the parsed URL on success, or
+/// a user-facing error message. Rejecting non-http(s) schemes blocks
+/// `javascript:`/`data:`/`file:` links that would otherwise execute or fetch
+/// when a visitor follows the short link.
+pub fn validate_target_url(raw: &str) -> Result<Url, String> {
+    if raw.len() > MAX_URL_LEN {
+        return Err(format!("URL is too long (max {} characters)", MAX_URL_LEN));
+    }
+    let parsed = Url::parse(raw).map_err(|_| "Invalid URL format".to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed),
+        other => Err(format!(
+            "Only http and https URLs are supported (got '{}')",
+            other
+        )),
+    }
+}
+
 pub async fn shorten_api(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<ShortenRequest>,
 ) -> Response {
-    let url_parsed = match Url::parse(&payload.url) {
+    let url_parsed = match validate_target_url(&payload.url) {
         Ok(u) => u,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Invalid URL format".to_string() })).into_response(),
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: err })).into_response();
+        }
     };
 
-    if let Some(host_header) = headers.get("host") {
-        if let Ok(host_str) = host_header.to_str() {
-            if is_same_domain(&url_parsed, host_str) {
-                return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Cannot shorten URLs from the same domain".to_string() })).into_response();
-            }
-        }
+    if let Some(host_header) = headers.get("host")
+        && let Ok(host_str) = host_header.to_str()
+        && is_same_domain(&url_parsed, host_str)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot shorten URLs from the same domain".to_string(),
+            }),
+        )
+            .into_response();
     }
 
     let expires_at = match parse_expires_in(payload.expires_in.as_deref()) {
         Ok(ts) => ts,
-        Err(err) => return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: err })).into_response(),
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: err })).into_response();
+        }
     };
 
     if let Some(custom) = payload.custom_code {
         if let Err(err) = validate_custom_code(&custom) {
             return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: err })).into_response();
         }
-        return match state.db.insert(custom.clone(), payload.url, expires_at).await {
-            Ok(true) => (StatusCode::CREATED, Json(ShortenResponse { code: custom, expires_at })).into_response(),
-            Ok(false) => (StatusCode::CONFLICT, Json(ErrorResponse { error: "Code already in use".to_string() })).into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        return match state
+            .db
+            .insert(custom.clone(), payload.url, expires_at)
+            .await
+        {
+            Ok(true) => (
+                StatusCode::CREATED,
+                Json(ShortenResponse {
+                    code: custom,
+                    expires_at,
+                }),
+            )
+                .into_response(),
+            Ok(false) => (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "Code already in use".to_string(),
+                }),
+            )
+                .into_response(),
+            Err(e) => {
+                tracing::error!("failed to insert custom code: {:?}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal server error".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
         };
     }
 
     match generate_and_insert(&state.db, payload.url, expires_at).await {
-        Ok(Some(code)) => (StatusCode::CREATED, Json(ShortenResponse { code, expires_at })).into_response(),
-        Ok(None) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Could not generate unique code".to_string() })).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(Some(code)) => (
+            StatusCode::CREATED,
+            Json(ShortenResponse { code, expires_at }),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Could not generate unique code".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("failed to generate and insert code: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                }),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -273,7 +459,10 @@ fn validate_custom_code(code: &str) -> Result<(), String> {
     if code.len() < 3 || code.len() > 32 {
         return Err("Custom code must be between 3 and 32 characters".to_string());
     }
-    if !code.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !code
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err("Invalid characters in code".to_string());
     }
     Ok(())
@@ -294,7 +483,10 @@ pub async fn redirect_url(
     match state.db.get_url(code).await {
         Ok(Some(url)) => Redirect::temporary(&url).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => {
+            tracing::error!("failed to look up code for redirect: {:?}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
+        }
     }
 }
 
@@ -330,7 +522,10 @@ mod tests {
         // Default (None) -> 7 days from now
         let result = parse_expires_in(None).unwrap();
         assert!(result.is_some());
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let diff = result.unwrap() - now;
         assert!((7 * DAY - 2..=7 * DAY).contains(&diff));
 
@@ -348,7 +543,10 @@ mod tests {
             let diff = result.unwrap() - now;
             assert!(
                 (expected - 2..=expected).contains(&diff),
-                "expires_in={} produced diff={}, expected ~{}", input, diff, expected
+                "expires_in={} produced diff={}, expected ~{}",
+                input,
+                diff,
+                expected
             );
         }
 
@@ -385,7 +583,11 @@ mod tests {
             .await
             .unwrap()
             .expect("should generate a code");
-        assert_eq!(code.len(), 3, "first successful code should be at min length 3");
+        assert_eq!(
+            code.len(),
+            3,
+            "first successful code should be at min length 3"
+        );
         assert_eq!(
             db.get_url(code.clone()).await.unwrap().as_deref(),
             Some("https://example.com")
@@ -401,8 +603,10 @@ mod tests {
                 .unwrap()
                 .expect("should generate a code");
             assert!(
-                code.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
-                "generated code '{}' must only contain a-z0-9", code
+                code.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "generated code '{}' must only contain a-z0-9",
+                code
             );
         }
     }
@@ -411,12 +615,61 @@ mod tests {
     async fn test_generate_and_insert_succeeds_under_contention() {
         let db = Db::new(":memory:").await.unwrap();
         for _ in 0..50 {
-            let _ = db.insert(nanoid!(3, &CODE_ALPHABET), "https://x".to_string(), None).await;
+            let _ = db
+                .insert(nanoid!(3, &CODE_ALPHABET), "https://x".to_string(), None)
+                .await;
         }
         let code = generate_and_insert(&db, "https://example.com".to_string(), None)
             .await
             .unwrap()
             .expect("should still generate a code");
         assert!((3..=12).contains(&code.len()));
+    }
+
+    #[test]
+    fn test_validate_target_url() {
+        // Accepts http/https and returns the parsed URL.
+        assert!(validate_target_url("https://example.com/path").is_ok());
+        assert!(validate_target_url("http://example.com").is_ok());
+
+        // Rejects dangerous / unexpected schemes.
+        assert!(validate_target_url("javascript:alert(1)").is_err());
+        assert!(validate_target_url("data:text/html,<script>alert(1)</script>").is_err());
+        assert!(validate_target_url("file:///etc/passwd").is_err());
+        assert!(validate_target_url("ftp://example.com").is_err());
+
+        // Rejects malformed URLs.
+        assert!(validate_target_url("not-a-url").is_err());
+
+        // Rejects over-length URLs.
+        let long = format!("https://example.com/{}", "a".repeat(MAX_URL_LEN));
+        assert!(validate_target_url(&long).is_err());
+    }
+
+    #[test]
+    fn test_now_secs_is_plausible() {
+        // Well past 2021-01-01 (1_600_000_000) and not the epoch fallback.
+        assert!(now_secs() > 1_600_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_db_new_creates_expires_at_index() {
+        let db = Db::new(":memory:").await.unwrap();
+        let has_index = db
+            .conn
+            .call(|conn| {
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM pragma_index_list('urls') WHERE name = 'idx_urls_expires_at'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok::<_, rusqlite::Error>(count)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            has_index, 1,
+            "idx_urls_expires_at should exist after Db::new"
+        );
     }
 }
