@@ -1,51 +1,50 @@
-let currentShortUrl = '';
+// Scripts are loaded with `defer`, so the DOM is parsed before this runs.
+const $ = (id) => document.getElementById(id);
 
-document.addEventListener('DOMContentLoaded', () => {
-    document.getElementById('shorten-form').addEventListener('submit', onSubmit);
-    document.getElementById('copy-btn').addEventListener('click', onCopy);
-    document.getElementById('open-btn').addEventListener('click', onOpen);
-    document.getElementById('share-btn').addEventListener('click', onShare);
-    document.getElementById('reset-btn').addEventListener('click', resetForm);
+const form = $('shorten-form');
+const result = $('result');
+const errorBox = $('error');
+const shortenBtn = $('shorten-btn');
+const copyBtn = $('copy-btn');
+const shortLink = $('short-link');
+const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'always' });
 
-    if (typeof navigator.share === 'function') {
-        document.getElementById('share-btn').hidden = false;
-    }
+let shortUrl = '';
 
-    document.getElementById('url').focus();
-});
+form.addEventListener('submit', onSubmit);
+copyBtn.addEventListener('click', onCopy);
+$('open-btn').addEventListener('click', () => window.open(shortUrl, '_blank', 'noopener'));
+$('reset-btn').addEventListener('click', resetForm);
+
+if (typeof navigator.share === 'function') {
+    const shareBtn = $('share-btn');
+    shareBtn.hidden = false;
+    shareBtn.addEventListener('click', onShare);
+}
+
+$('url').focus();
 
 async function onSubmit(event) {
     event.preventDefault();
 
-    const url = document.getElementById('url').value.trim();
-    const custom_code = document.getElementById('custom_code').value.trim();
-    const expires_in = document.getElementById('expires_in').value;
-    const errorDiv = document.getElementById('error');
+    const url = $('url').value.trim();
+    const custom_code = $('custom_code').value.trim();
+    const expires_in = $('expires_in').value;
 
-    errorDiv.textContent = '';
-
-    if (!url) {
-        showError('URL is required');
-        return;
-    }
+    errorBox.textContent = '';
+    if (!url) return showError('URL is required');
 
     setLoading(true);
-
     try {
-        const response = await fetch('/api/v1/shorten', {
+        const res = await fetch('/api/v1/shorten', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, custom_code: custom_code || null, expires_in })
+            body: JSON.stringify({ url, custom_code: custom_code || null, expires_in }),
         });
-
-        const data = await response.json();
-
-        if (response.ok) {
-            showSuccess(data);
-        } else {
-            showError(data.error || 'Something went wrong');
-        }
-    } catch (err) {
+        const data = await res.json();
+        if (res.ok) showSuccess(data);
+        else showError(data.error || 'Something went wrong');
+    } catch {
         showError('Failed to connect to the server');
     } finally {
         setLoading(false);
@@ -53,51 +52,39 @@ async function onSubmit(event) {
 }
 
 function showSuccess({ code, expires_at }) {
-    currentShortUrl = window.location.origin + '/' + code;
+    shortUrl = `${location.origin}/${code}`;
+    shortLink.href = shortUrl;
+    shortLink.textContent = shortUrl;
 
-    const link = document.getElementById('short-link');
-    link.href = currentShortUrl;
-    link.textContent = currentShortUrl;
-
-    const expiryInfo = document.getElementById('expiry-info');
+    const expiryInfo = $('expiry-info');
     expiryInfo.textContent = relativeExpiry(expires_at);
-    if (expires_at) {
-        expiryInfo.title = new Date(expires_at * 1000).toLocaleString();
-    } else {
-        expiryInfo.removeAttribute('title');
-    }
+    if (expires_at) expiryInfo.title = new Date(expires_at * 1000).toLocaleString();
+    else expiryInfo.removeAttribute('title');
 
-    renderQR(currentShortUrl);
-
-    document.getElementById('shorten-form').hidden = true;
-    document.getElementById('result').hidden = false;
-    document.getElementById('copy-btn').focus();
+    renderQR(shortUrl);
+    form.hidden = true;
+    result.hidden = false;
+    copyBtn.focus();
 }
 
 function relativeExpiry(expiresAt) {
     if (!expiresAt) return 'This link never expires';
     const secs = expiresAt - Math.floor(Date.now() / 1000);
     if (secs <= 0) return 'Expired';
-    const days = Math.round(secs / 86400);
-    if (days >= 365) {
-        const years = Math.round(days / 365);
-        return `Expires in ${years} year${years === 1 ? '' : 's'}`;
-    }
-    if (days >= 30) {
-        const months = Math.round(days / 30);
-        return `Expires in ${months} month${months === 1 ? '' : 's'}`;
-    }
-    if (days >= 1) return `Expires in ${days} day${days === 1 ? '' : 's'}`;
-    const hours = Math.max(1, Math.round(secs / 3600));
-    return `Expires in ${hours} hour${hours === 1 ? '' : 's'}`;
+    const [value, unit] =
+        secs >= 31536000 ? [Math.round(secs / 31536000), 'year']
+        : secs >= 2592000 ? [Math.round(secs / 2592000), 'month']
+        : secs >= 86400 ? [Math.round(secs / 86400), 'day']
+        : [Math.max(1, Math.round(secs / 3600)), 'hour'];
+    return `Expires ${rtf.format(value, unit)}`;
 }
 
 function renderQR(text) {
-    const canvas = document.getElementById('qr-canvas');
+    const canvas = $('qr-canvas');
     const ctx = canvas.getContext('2d');
     const size = canvas.width;
 
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, size, size);
 
     try {
@@ -107,12 +94,10 @@ function renderQR(text) {
         const count = qr.getModuleCount();
         const cell = Math.floor(size / (count + 2));
         const offset = Math.floor((size - cell * count) / 2);
-        ctx.fillStyle = '#000000';
+        ctx.fillStyle = '#000';
         for (let r = 0; r < count; r++) {
             for (let c = 0; c < count; c++) {
-                if (qr.isDark(r, c)) {
-                    ctx.fillRect(offset + c * cell, offset + r * cell, cell, cell);
-                }
+                if (qr.isDark(r, c)) ctx.fillRect(offset + c * cell, offset + r * cell, cell, cell);
             }
         }
     } catch (err) {
@@ -125,56 +110,46 @@ function renderQR(text) {
 }
 
 async function onCopy() {
-    const copyBtn = document.getElementById('copy-btn');
     try {
-        await navigator.clipboard.writeText(currentShortUrl);
+        await navigator.clipboard.writeText(shortUrl);
         const original = copyBtn.textContent;
         copyBtn.textContent = 'Copied!';
         setTimeout(() => { copyBtn.textContent = original; }, 2000);
-    } catch (err) {
+    } catch {
         selectShortLink();
     }
 }
 
 function selectShortLink() {
-    const link = document.getElementById('short-link');
     const range = document.createRange();
-    range.selectNodeContents(link);
-    const sel = window.getSelection();
+    range.selectNodeContents(shortLink);
+    const sel = getSelection();
     sel.removeAllRanges();
     sel.addRange(range);
 }
 
-function onOpen() {
-    window.open(currentShortUrl, '_blank', 'noopener');
-}
-
 async function onShare() {
     try {
-        await navigator.share({ url: currentShortUrl, title: 'Short link' });
+        await navigator.share({ url: shortUrl, title: 'Short link' });
     } catch (err) {
-        if (err && err.name !== 'AbortError') {
-            console.error('Share failed:', err);
-        }
+        if (err?.name !== 'AbortError') console.error('Share failed:', err);
     }
 }
 
 function resetForm() {
-    document.getElementById('url').value = '';
-    document.getElementById('custom_code').value = '';
-    document.getElementById('error').textContent = '';
-
-    document.getElementById('result').hidden = true;
-    document.getElementById('shorten-form').hidden = false;
-    document.getElementById('url').focus();
+    $('url').value = '';
+    $('custom_code').value = '';
+    errorBox.textContent = '';
+    result.hidden = true;
+    form.hidden = false;
+    $('url').focus();
 }
 
 function showError(msg) {
-    document.getElementById('error').textContent = msg;
+    errorBox.textContent = msg;
 }
 
-function setLoading(isLoading) {
-    const btn = document.getElementById('shorten-btn');
-    btn.disabled = isLoading;
-    btn.textContent = isLoading ? 'Shortening...' : 'Shorten URL';
+function setLoading(on) {
+    shortenBtn.disabled = on;
+    shortenBtn.textContent = on ? 'Shortening...' : 'Shorten URL';
 }

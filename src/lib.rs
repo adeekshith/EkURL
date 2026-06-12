@@ -86,17 +86,18 @@ impl Db {
     ) -> anyhow::Result<bool> {
         self.conn
             .call(move |conn| {
-                match conn.execute(
-                    "INSERT INTO urls (code, url, expires_at) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![code, url, expires_at],
-                ) {
+                let result = conn
+                    .prepare_cached("INSERT INTO urls (code, url, expires_at) VALUES (?1, ?2, ?3)")?
+                    .execute(rusqlite::params![code, url, expires_at]);
+                match result {
                     Ok(_) => Ok(true),
+                    // Duplicate code -> PRIMARY KEY constraint violation.
                     Err(rusqlite::Error::SqliteFailure(e, _))
                         if e.code == rusqlite::ErrorCode::ConstraintViolation =>
                     {
                         Ok(false)
                     }
-                    Err(e) => Err(tokio_rusqlite::Error::Error(e)),
+                    Err(e) => Err(e),
                 }
             })
             .await
@@ -107,7 +108,8 @@ impl Db {
         let count = self
             .conn
             .call(move |conn| {
-                conn.execute("DELETE FROM urls WHERE code = ?1", rusqlite::params![code])
+                conn.prepare_cached("DELETE FROM urls WHERE code = ?1")?
+                    .execute(rusqlite::params![code])
             })
             .await?;
         Ok(count > 0)
@@ -116,19 +118,13 @@ impl Db {
     pub async fn list(&self) -> anyhow::Result<Vec<(String, String, Option<i64>)>> {
         self.conn
             .call(|conn| {
-                let now = now_secs();
-                let mut stmt = conn.prepare(
-                "SELECT code, url, expires_at FROM urls WHERE expires_at IS NULL OR expires_at > ?1"
-            )?;
-                let rows = stmt.query_map(rusqlite::params![now], |row| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT code, url, expires_at FROM urls WHERE expires_at IS NULL OR expires_at > ?1",
+                )?;
+                stmt.query_map(rusqlite::params![now_secs()], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })?;
-
-                let mut result = Vec::new();
-                for row in rows {
-                    result.push(row?);
-                }
-                Ok::<_, rusqlite::Error>(result)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
             })
             .await
             .map_err(|e| anyhow::anyhow!(e))
@@ -137,12 +133,10 @@ impl Db {
     pub async fn count(&self) -> anyhow::Result<u64> {
         self.conn
             .call(|conn| {
-                let now = now_secs();
-                conn.query_row(
+                conn.prepare_cached(
                     "SELECT COUNT(*) FROM urls WHERE expires_at IS NULL OR expires_at > ?1",
-                    rusqlite::params![now],
-                    |row| row.get(0),
-                )
+                )?
+                .query_row(rusqlite::params![now_secs()], |row| row.get(0))
             })
             .await
             .map_err(|e| anyhow::anyhow!(e))
@@ -151,43 +145,39 @@ impl Db {
     pub async fn get_url(&self, code: String) -> anyhow::Result<Option<String>> {
         self.conn
             .call(move |conn| {
-                let now = now_secs();
-                let url: Option<String> = conn.query_row(
-                "SELECT url FROM urls WHERE code = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
-                rusqlite::params![code, now],
-                |row| row.get(0)
-            ).optional()?;
-                Ok::<_, rusqlite::Error>(url)
+                conn.prepare_cached(
+                    "SELECT url FROM urls WHERE code = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
+                )?
+                .query_row(rusqlite::params![code, now_secs()], |row| row.get(0))
+                .optional()
             })
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn exists(&self, code: String) -> anyhow::Result<bool> {
-        self.conn.call(move |conn| {
-            let now = now_secs();
-            let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM urls WHERE code = ?1 AND (expires_at IS NULL OR expires_at > ?2))",
-                rusqlite::params![code, now],
-                |row| row.get(0)
-            )?;
-            Ok::<_, rusqlite::Error>(exists)
-        }).await.map_err(|e| anyhow::anyhow!(e))
+        self.conn
+            .call(move |conn| {
+                conn.prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM urls WHERE code = ?1 AND (expires_at IS NULL OR expires_at > ?2))",
+                )?
+                .query_row(rusqlite::params![code, now_secs()], |row| row.get(0))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn cleanup_expired(&self) -> anyhow::Result<u64> {
         let count = self
             .conn
             .call(|conn| {
-                let now = now_secs();
-                let deleted = conn.execute(
+                conn.prepare_cached(
                     "DELETE FROM urls WHERE expires_at IS NOT NULL AND expires_at <= ?1",
-                    rusqlite::params![now],
-                )?;
-                Ok::<_, rusqlite::Error>(deleted as u64)
+                )?
+                .execute(rusqlite::params![now_secs()])
             })
             .await?;
-        Ok(count)
+        Ok(count as u64)
     }
 }
 
