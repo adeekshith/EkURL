@@ -6,12 +6,12 @@ RUN apk add --no-cache musl-dev build-base
 WORKDIR /app
 
 # Copy the source code
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY static ./static
 
-# Build the application
-RUN cargo build --release
+# Build the application against the locked dependency versions
+RUN cargo build --release --locked
 
 # Final stage
 FROM scratch

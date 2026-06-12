@@ -1,40 +1,34 @@
+/* Theme tokens. light-dark() resolves against the user's OS preference,
+   so no separate prefers-color-scheme block is needed. */
 :root {
+    color-scheme: light dark;
     --primary: #2563eb;
     --primary-hover: #1d4ed8;
-    --bg: #f8fafc;
-    --card-bg: white;
-    --text: #1e293b;
-    --text-muted: #64748b;
-    --border: #cbd5e1;
-    --result-bg: #f1f5f9;
-    --link: #2563eb;
+    --bg: light-dark(#f8fafc, #0f172a);
+    --card-bg: light-dark(#ffffff, #1e293b);
+    --text: light-dark(#1e293b, #f8fafc);
+    --text-muted: light-dark(#64748b, #94a3b8);
+    --border: light-dark(#cbd5e1, #334155);
+    --result-bg: light-dark(#f1f5f9, #334155);
+    --link: light-dark(#2563eb, #60a5fa);
     --error: #ef4444;
-}
-
-@media (prefers-color-scheme: dark) {
-    :root {
-        --bg: #0f172a;
-        --card-bg: #1e293b;
-        --text: #f8fafc;
-        --text-muted: #94a3b8;
-        --border: #334155;
-        --result-bg: #334155;
-        --link: #60a5fa;
-    }
+    --ring: color-mix(in srgb, var(--primary) 20%, transparent);
+    /* Secondary buttons carry white text, so both states stay dark enough to read. */
+    --btn-secondary: light-dark(#64748b, #475569);
+    --btn-secondary-hover: light-dark(#475569, #64748b);
 }
 
 body {
-    font-family: system-ui, -apple-system, sans-serif;
-    background-color: var(--bg);
+    font-family: system-ui, sans-serif;
+    background: var(--bg);
     color: var(--text);
     display: flex;
     justify-content: center;
     align-items: center;
-    min-height: 100vh;
+    min-height: 100dvh;
     margin: 0;
     padding: 1rem;
     box-sizing: border-box;
-    transition: background-color 0.3s, color 0.3s;
 }
 
 .container {
@@ -44,50 +38,40 @@ body {
     box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1);
     width: 100%;
     max-width: 400px;
-    transition: background-color 0.3s, box-shadow 0.3s;
 }
 
 [hidden] { display: none !important; }
 
-.form-group { margin-bottom: 1.25rem; }
+.form-group { margin-block-end: 1.25rem; }
 
-label { 
-    display: block; 
-    margin-bottom: 0.5rem; 
-    font-weight: 600; 
+label {
+    display: block;
+    margin-block-end: 0.5rem;
+    font-weight: 600;
     font-size: 0.875rem;
 }
 
-input {
+input, select {
     width: 100%;
     padding: 0.75rem;
     border: 1px solid var(--border);
     border-radius: 0.5rem;
     box-sizing: border-box;
-    background-color: var(--card-bg);
+    background: var(--card-bg);
     color: var(--text);
     font-size: 1rem;
-    transition: all 0.2s;
-}
+    transition: border-color 0.2s, box-shadow 0.2s;
 
-input:focus {
-    outline: none;
-    border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    &:focus-visible {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--ring);
+    }
 }
 
 input::placeholder { color: var(--text-muted); }
 
 select {
-    width: 100%;
-    padding: 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: 0.5rem;
-    box-sizing: border-box;
-    background-color: var(--card-bg);
-    color: var(--text);
-    font-size: 1rem;
-    transition: all 0.2s;
     cursor: pointer;
     appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
@@ -95,36 +79,28 @@ select {
     background-position: right 0.75rem center;
 }
 
-select:focus {
-    outline: none;
-    border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-}
-
 button {
     width: 100%;
     padding: 0.75rem;
-    background-color: var(--primary);
-    color: white;
+    background: var(--primary);
+    color: #fff;
     border: none;
     border-radius: 0.5rem;
     font-weight: 600;
     font-size: 1rem;
     cursor: pointer;
     transition: background-color 0.2s;
+
+    &:hover { background: var(--primary-hover); }
+    &:active { transform: translateY(1px); }
 }
-
-button:hover { background-color: var(--primary-hover); }
-
-button:active { transform: translateY(1px); }
 
 #result {
     padding: 1.25rem;
     background: var(--result-bg);
+    border: 1px dashed var(--border);
     border-radius: 0.5rem;
     word-break: break-all;
-    border: 1px dashed var(--border);
-    transition: background-color 0.3s;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -145,9 +121,9 @@ button:active { transform: translateY(1px); }
     text-decoration: none;
     font-weight: 600;
     font-size: 1.125rem;
-}
 
-#short-link:hover { text-decoration: underline; }
+    &:hover { text-decoration: underline; }
+}
 
 .expiry-info {
     margin: 0;
@@ -156,7 +132,7 @@ button:active { transform: translateY(1px); }
 }
 
 #qr-canvas {
-    background: white;
+    background: #fff;
     padding: 0.5rem;
     border-radius: 0.5rem;
     width: 180px;
@@ -167,18 +143,17 @@ button:active { transform: translateY(1px); }
     display: flex;
     gap: 0.5rem;
     width: 100%;
-    margin-top: 0.25rem;
-}
+    margin-block-start: 0.25rem;
 
-.action-row .secondary {
-    flex: 1;
-    background-color: var(--text-muted);
-    font-size: 0.875rem;
-    padding: 0.5rem;
-    margin: 0;
-}
+    .secondary {
+        flex: 1;
+        background: var(--btn-secondary);
+        font-size: 0.875rem;
+        padding: 0.5rem;
 
-.action-row .secondary:hover { background-color: var(--text); }
+        &:hover { background: var(--btn-secondary-hover); }
+    }
+}
 
 .link-btn {
     background: none;
@@ -187,17 +162,17 @@ button:active { transform: translateY(1px); }
     font-size: 0.875rem;
     font-weight: 500;
     width: auto;
-    margin-top: 0.25rem;
-}
+    margin-block-start: 0.25rem;
 
-.link-btn:hover {
-    background: none;
-    text-decoration: underline;
+    &:hover {
+        background: none;
+        text-decoration: underline;
+    }
 }
 
 .error {
     color: var(--error);
-    margin-top: 0.75rem;
+    margin-block-start: 0.75rem;
     font-size: 0.875rem;
     text-align: center;
     font-weight: 500;

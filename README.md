@@ -12,6 +12,8 @@ A high-performance, low-resource URL shortener written in Rust (2024 edition). I
 - Abuse protection: `http`/`https`-only links, URL length cap, per-IP rate limiting, and security response headers.
 - Static Musl build in a `scratch` Docker image (minimal footprint).
 
+> **Browser support:** the web UI targets current browsers and uses modern web platform features (CSS `light-dark()`, nesting, `color-mix()`, and `Intl.RelativeTimeFormat`). Recent versions of Chrome, Edge, Firefox, and Safari are supported.
+
 ## Configuration
 
 The following environment variables can be used to configure the application:
